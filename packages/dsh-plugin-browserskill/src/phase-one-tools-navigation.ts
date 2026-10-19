@@ -59,6 +59,52 @@ export function registerPhaseOneNavigationTools(
 
   register(
     defineTool({
+      name: "page.wait-ms",
+      description:
+        "Wait a fixed duration on the daemon. No browser session is required; prefer a page or element condition when available.",
+      parameters: {
+        durationMs: {
+          type: "integer",
+          required: true,
+          description: "Duration in milliseconds, 0..300000.",
+        },
+      },
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { waitedMs: { type: "integer", required: true } },
+        },
+        render: (_args, value) => [{ type: "text", text: `waited ${value.waitedMs}ms` }],
+      },
+      async execute(args, exec) {
+        if (
+          !Number.isInteger(args.durationMs) ||
+          args.durationMs < 0 ||
+          args.durationMs > 300_000
+        ) {
+          throw new Error("durationMs must be an integer in 0..300000");
+        }
+        const reply = (await runtime.run(
+          exec,
+          ["wait-ms", `${args.durationMs}ms`],
+          "wait-ms",
+          undefined,
+          runnerTimeout(deps, args.durationMs),
+        )) as { waited_ms: number };
+        return { waitedMs: reply.waited_ms };
+      },
+      presentCall: (args) => ({
+        card: "terminal",
+        title: runtime.commandLine(["wait-ms", `${args.durationMs}ms`]),
+        description: "Wait a fixed duration",
+      }),
+      presentResult: runtime.presentTerminalResult,
+    }),
+  );
+
+  register(
+    defineTool({
       name: "page.wait-for-element",
       description: "Wait for one observed element condition; a timeout returns satisfied=false.",
       parameters: {

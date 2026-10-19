@@ -48,14 +48,17 @@ describe("registerBskSkill", () => {
     expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
-    expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
-    // Keep the lazily injected instructions inside a bounded prompt budget,
-    // while the lower bound catches accidental truncation of the guidance.
-    expect(content.length).toBeGreaterThan(3_000);
-    expect(content.length).toBeLessThan(4_500);
+    expect(content).toContain("Page-script `evaluate` is supported");
+    expect(content).toContain("Interaction recording remains unsupported");
+    // Match the build's UTF-8 budget, including source frontmatter; the lower
+    // bound catches accidental truncation of the injected guidance.
+    expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(3_000);
     const base = skill.resourceBase as { kind: string; path: string };
     expect(base.kind).toBe("directory");
     expect(isAbsolute(base.path)).toBe(true);
+    expect(
+      Buffer.byteLength(readFileSync(join(base.path, "SKILL.md"), "utf8"), "utf8"),
+    ).toBeLessThanOrEqual(4_500);
     const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].sort()).toEqual([
       "references/debugging.md",

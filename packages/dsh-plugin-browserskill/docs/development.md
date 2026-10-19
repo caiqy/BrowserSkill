@@ -2,7 +2,9 @@
 
 For installation, usage, and configuration, see the [plugin README](../README.md).
 These notes describe the current source on this branch; a published npm version may
-not include later changes.
+not include later changes. For this branch's official baseline, local build,
+manual updates/rollback and pending real-browser evidence, see
+[DSH enhancement delivery notes](dsh-enhancement.md).
 
 ## Tool execution
 

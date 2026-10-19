@@ -7,6 +7,10 @@ Use [BrowserSkill](https://github.com/Tencent/BrowserSkill) in
 websites, fill forms, and capture screenshots through native `bsk_*` tools.
 Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
+This branch carries the local `0.3.3-dsh.1` enhancement over official `0.3.3`.
+See [DSH enhancement delivery notes](docs/dsh-enhancement.md) for the baseline,
+structured examples, build/rollback steps and actual verification boundaries.
+
 ## Installation
 
 Before installing the plugin:
@@ -51,6 +55,8 @@ Installed plugins do not update automatically. To upgrade this plugin to npm's
 dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 ```
 
+For this local enhancement, updating from official npm replaces the local patch;
+follow the [manual update/rollback procedure](docs/dsh-enhancement.md#更新与回退).
 Restart that dsh profile after upgrading. This command updates the plugin; update
 the `bsk` CLI and browser extension separately when a release requires it.
 
@@ -87,10 +93,10 @@ capabilities. Updating the npm package does not update either component.
 
 | Tool | Actions | Purpose |
 | --- | --- | --- |
-| `bsk_session` | `start`, `stop`, `list` | Manage plugin-owned Agent Window sessions. |
-| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element` | Navigate the active tab; wait for page lifecycle events or one element condition. |
+| `bsk_session` | `start`, `stop`, `list`, `browsers` | Manage plugin-owned sessions; query connected browser instances. |
+| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element`, `wait-ms` | Navigate; wait for lifecycle events, an element condition, or a fixed delay. |
 | `bsk_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
-| `bsk_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press` | Interact with controls using fresh refs or selectors. |
+| `bsk_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls, evaluate page scripts and transfer local files. |
 | `bsk_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
 | `bsk_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
 
@@ -108,7 +114,10 @@ For `bsk_inspect` with `action: "extract"`, see
 [structured extraction](../../docs/structured-extraction.md) for discovery, list
 fields, JSON/CSV output and loaded-DOM completeness.
 
-Arbitrary page-script evaluation and interaction recording are not supported.
+Page-script evaluation is available through `bsk_interact` with `action: "evaluate"`.
+The local enhancement also adds full-page screenshots, HTML file export, hover
+probes, extended emulation and named sessions; see the [structured examples](docs/dsh-enhancement.md#结构化工具示例).
+User interaction trace recording remains unsupported; existing task video is separate.
 
 ### Activation failures
 

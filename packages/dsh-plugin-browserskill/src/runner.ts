@@ -134,9 +134,10 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
       return new Promise<BskRunResult>((resolve, reject) => {
         let child: ChildProcess;
         try {
+          // Global flags precede literal scripts/targets and cannot be confused with option values.
           child = spawnImpl(
             bskPath,
-            [...args, "--json"],
+            ["--json", ...args],
             windows
               ? {
                   windowsHide: true,

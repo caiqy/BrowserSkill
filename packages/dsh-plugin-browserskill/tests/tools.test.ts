@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
@@ -243,8 +243,8 @@ async function startSession(tools: Map<string, ToolDefinition>, sessionId = "s1"
 const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chrome-1" });
 
 const EXPECTED_ACTIONS = {
-  bsk_session: ["start", "stop", "list"],
-  bsk_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element"],
+  bsk_session: ["start", "stop", "list", "browsers"],
+  bsk_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element", "wait-ms"],
   bsk_inspect: [
     "observe",
     "snapshot",
@@ -266,6 +266,9 @@ const EXPECTED_ACTIONS = {
     "fill",
     "select",
     "press",
+    "evaluate",
+    "upload",
+    "download",
   ],
   bsk_tabs: ["list", "create", "select", "close", "borrow", "return"],
   bsk_assist: ["resize", "emulate", "request-help"],
@@ -542,7 +545,9 @@ describe("session.start", () => {
     const spawnedPromise = new Promise<void>((resolve) => {
       spawned = resolve;
     });
-    const runner = createBskRunner("bsk", (_command, args) => {
+    const runner = createBskRunner("bsk", (_command, argv) => {
+      expect(argv[0]).toBe("--json");
+      const args = argv.slice(1);
       // Main now prepares and claims the start request around session start.
       // Those commands close normally; only the start child keeps its pipes open.
       if (args[0] === "session" && args[1] === "request") {
@@ -1570,6 +1575,147 @@ describe("inspect.screenshot", () => {
   });
 });
 
+describe("enhanced session, observation and emulation", () => {
+  it("lists real browser metadata without a session and preserves named tracked starts", async () => {
+    const browsers = [{ instance_id: "chrome-1", extension_version: "0.3.3", label: "chrome" }];
+    const { tools, calls, registry } = setup({ browsers, "session start": START_REPLY("s1") });
+    expect(await tools.get("bsk_session")!.execute({ action: "browsers" }, makeExec())).toEqual(
+      browsers,
+    );
+    expect(registry.list()).toEqual([]);
+    await tools
+      .get("bsk_session")!
+      .execute({ action: "start", name: "upload check", browser: "chrome-1" }, makeExec());
+    expect(calls.at(-1)!.args).toEqual(
+      expect.arrayContaining(["--name", "upload check", "--browser", "chrome-1", "--request-id"]),
+    );
+    expect(registry.list()).toHaveLength(1);
+  });
+
+  it("returns empty browser lists and propagates unavailable errors", async () => {
+    const { tools } = setup({ browsers: [] });
+    const tool = tools.get("bsk_session")!;
+    expect(await tool.execute({ action: "browsers" }, makeExec())).toEqual([]);
+    // A separate runner error must remain an error, never an invented browser entry.
+    const offline = setup({ browsers: new Error("offline") });
+    await expect(
+      offline.tools.get("bsk_session")!.execute({ action: "browsers" }, makeExec()),
+    ).rejects.toThrow("offline");
+  });
+
+  it("preserves all hover diagnostics and marks active probing unsafe", async () => {
+    const diagnostics = {
+      hover_probe: { attempted: 1, revealed_content: true },
+      debug: { surfaces: ["menu"] },
+      dialogs: [{ type: "alert" }],
+    };
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      observe: { ...SNAPSHOT_REPLY, ...diagnostics },
+    });
+    await startSession(tools);
+    const tool = tools.get("bsk_inspect")!;
+    const args = { action: "observe", tabId: 7, probeHover: true, debugSurfaces: true };
+    const value = await tool.execute(args, makeExec());
+    expect(value).toMatchObject({
+      hoverProbe: diagnostics.hover_probe,
+      debug: diagnostics.debug,
+      dialogs: diagnostics.dialogs,
+    });
+    expect(calls.at(-1)!.args).toEqual([
+      "observe",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--probe-hover",
+      "--debug-surfaces",
+    ]);
+    expect(tool.isConcurrencySafe?.(args)).toBe(false);
+    expect(tool.isConcurrencySafe?.({ action: "observe" })).toBe(true);
+    expect(JSON.stringify(tool.output.render(args, value as never))).toContain("revealed_content");
+    const count = calls.length;
+    await expect(
+      tool.execute({ action: "observe", cursor: "next", debugSurfaces: true }, makeExec()),
+    ).rejects.toThrow("cursor");
+    expect(calls).toHaveLength(count);
+  });
+
+  it("passes preset overrides, explicit false and targeted tabs to official emulate", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      emulate: { tab_id: 7, cleared: false },
+    });
+    await startSession(tools);
+    await tools.get("bsk_assist")!.execute(
+      {
+        action: "emulate",
+        tabId: 7,
+        device: "iphone-14",
+        width: 500,
+        mobile: false,
+        touch: false,
+        dpr: 1.5,
+        ua: "test ua",
+        acceptLanguage: "zh-CN",
+        maxTouchPoints: 2,
+      },
+      makeExec(),
+    );
+    expect(calls.at(-1)!.args).toEqual([
+      "emulate",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--device",
+      "iphone-14",
+      "--width",
+      "500",
+      "--dpr",
+      "1.5",
+      "--ua",
+      "test ua",
+      "--accept-language",
+      "zh-CN",
+      "--max-touch-points",
+      "2",
+      "--no-mobile",
+      "--no-touch",
+    ]);
+    await tools.get("bsk_assist")!.execute({ action: "emulate", touch: false }, makeExec());
+    expect(calls.at(-1)!.args).toEqual(["emulate", "--session", "s1", "--no-touch"]);
+  });
+
+  it.each([
+    { off: true, mobile: false },
+    { off: true, touch: false },
+    { off: true, dpr: 1 },
+    { off: true, ua: "ua" },
+    { off: true, acceptLanguage: "en" },
+    { off: true, maxTouchPoints: 1 },
+    { width: 0, height: 100 },
+    { width: 100, height: 7681 },
+    { width: 1.5, height: 100 },
+    { device: "iphone-14", dpr: Number.NaN },
+    { device: "iphone-14", dpr: 0 },
+    { device: "iphone-14", maxTouchPoints: 0 },
+    { maxTouchPoints: 1.5 },
+    { width: 100 },
+    { mobile: false },
+    { dpr: 1 },
+    { acceptLanguage: "en" },
+  ])("rejects invalid emulate options before dispatch: %j", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    const count = calls.length;
+    await expect(
+      tools.get("bsk_assist")!.execute({ action: "emulate", ...args }, makeExec()),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(count);
+  });
+});
+
 describe("error and cancellation semantics", () => {
   it("surfaces the bsk JSON error envelope with code and hint", async () => {
     const { tools } = setup({
@@ -1747,6 +1893,76 @@ describe("screenshot scratch file lifecycle", () => {
     const out = calls.find((c) => c.args[0] === "screenshot")?.args.at(-1);
     expect(out).toBeDefined();
     expect(existsSync(out ?? "")).toBe(false);
+  });
+
+  it("keeps exclusive explicit output beside an attachment and cleans only scratch", async () => {
+    const { runner, calls } = outWritingRunner();
+    const { tools } = setupWithRunner(runner, IMAGE_SERVICES);
+    await startSession(tools);
+    const output = join(mkdtempSync(join(tmpdir(), "bsk-explicit-")), "full.png");
+    const exec = makeExec({
+      agent: {
+        session: { requestHeader: () => ({ config: { provider: "p", model: "vl" } }) },
+        options: {},
+      },
+    });
+    const tool = tools.get("bsk_inspect")!;
+    const args = {
+      action: "screenshot",
+      fullPage: true,
+      scope: "current",
+      tabId: 7,
+      timeoutMs: 125_000,
+      output,
+    };
+    const value = (await tool.execute(args, exec)) as { image?: unknown; path: string };
+    expect(value.image).toBeDefined();
+    expect(value.path).toBe(output);
+    expect(readFileSync(output)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const call = calls.find((c) => c.args[0] === "screenshot")!;
+    const scratch = call.args[call.args.indexOf("--out") + 1];
+    expect(call.args).toEqual(
+      expect.arrayContaining([
+        "--full-page",
+        "--scope",
+        "current",
+        "--tab-id",
+        "7",
+        "--timeout",
+        "125000ms",
+      ]),
+    );
+    expect(call.options.timeoutMs).toBeGreaterThanOrEqual(140_000);
+    expect(existsSync(scratch)).toBe(false);
+    expect(tool.isConcurrencySafe?.(args)).toBe(false);
+    expect(tool.isConcurrencySafe?.({ action: "screenshot" })).toBe(true);
+    expect(JSON.stringify(tool.output.render(args, value as never))).toContain(
+      output.replaceAll("\\", "\\\\"),
+    );
+    await expect(tool.execute({ action: "screenshot", output }, makeExec())).rejects.toThrow(
+      "EEXIST",
+    );
+    expect(readFileSync(output)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  });
+
+  it("rejects illegal screenshot combinations before dispatch", async () => {
+    const { runner, calls } = outWritingRunner();
+    const { tools } = setupWithRunner(runner);
+    await startSession(tools);
+    const count = calls.length;
+    for (const args of [
+      { fullPage: true, ref: "@e1" },
+      { scope: "current" },
+      { timeoutMs: 1000 },
+      { output: " " },
+      { fullPage: true, timeoutMs: 0 },
+      { fullPage: true, scope: "invalid" },
+    ]) {
+      await expect(
+        tools.get("bsk_inspect")!.execute({ action: "screenshot", ...args }, makeExec()),
+      ).rejects.toThrow();
+    }
+    expect(calls).toHaveLength(count);
   });
 
   it("keeps the PNG only when it is the model-facing artifact (no store)", async () => {

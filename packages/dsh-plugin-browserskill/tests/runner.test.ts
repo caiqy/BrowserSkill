@@ -66,7 +66,7 @@ afterEach(() => {
 });
 
 describe("createBskRunner", () => {
-  it("appends --json and collects stdout", async () => {
+  it("prepends --json and collects stdout", async () => {
     const child = new FakeChild();
     const seen: string[][] = [];
     const runner = createBskRunner("bsk", (cmd: string, args: string[]) => {
@@ -76,13 +76,29 @@ describe("createBskRunner", () => {
     const promise = runner.run(["session", "list"]);
     child.finish(0, '{"ok":true}');
     const result = await promise;
-    expect(seen).toEqual([["bsk", "session", "list", "--json"]]);
+    expect(seen).toEqual([["bsk", "--json", "session", "list"]]);
     expect(result).toMatchObject({
       code: 0,
       stdout: '{"ok":true}',
       aborted: false,
       timedOut: false,
     });
+  });
+
+  it.each([
+    ["evaluate", "--", "-1"],
+    ["fill", "--value", "--", "#field"],
+  ])("keeps literal positional and option values unchanged: %j", async (...args) => {
+    const child = new FakeChild();
+    let seen: string[] = [];
+    const runner = createBskRunner("bsk", (_command, argv) => {
+      seen = argv;
+      return child as unknown as ChildProcess;
+    });
+    const pending = runner.run(args);
+    child.finish(0, "{}");
+    await pending;
+    expect(seen).toEqual(["--json", ...args]);
   });
 
   it("kills the child when the abort signal fires", async () => {
@@ -165,7 +181,7 @@ describe("createBskRunner", () => {
     });
     await vi.advanceTimersByTimeAsync(100); // timeout fires -> SIGINT
     expect(result).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.advanceTimersByTimeAsync(process.platform === "win32" ? 16_000 : 4_000);
     expect(result).toMatchObject({ code: null, timedOut: true });
     expect(child.killedWith).toEqual(["SIGINT", "SIGKILL"]);
     // Settling is not enough: our ends of the pipes have to go too, or a process
@@ -316,7 +332,7 @@ describe("createBskRunner", () => {
     });
     expect(runner.killFor("s1")).toBe(1);
     runner.killAll();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.advanceTimersByTimeAsync(process.platform === "win32" ? 16_000 : 4_000);
     expect(results[0]).toMatchObject({ code: null });
     expect(results[1]).toMatchObject({ code: null });
     expect(children.map((c) => c.stdout.destroyed)).toEqual([true, true]);
@@ -345,8 +361,9 @@ describe("createBskRunner against real processes", () => {
   const hostSource = (bskPath: string) =>
     [
       `import { createBskRunner } from ${JSON.stringify(runnerUrl)};`,
-      "const runner = createBskRunner(process.execPath);",
-      `const result = await runner.run([${JSON.stringify(bskPath)}]);`,
+      'import { spawn } from "node:child_process";',
+      `const runner = createBskRunner("bsk", (_command, args, options) => spawn(process.execPath, [${JSON.stringify(bskPath)}, ...args], options));`,
+      "const result = await runner.run([]);",
       "process.stdout.write(JSON.stringify({ code: result.code, stdout: result.stdout }));",
     ].join("\n");
 
@@ -414,7 +431,7 @@ describe("Windows parent cancellation", () => {
     const result = runner.run(["snapshot"], { signal: abort.signal });
     expect(spawn.mock.calls[0]).toEqual([
       "bsk",
-      ["snapshot", "--json"],
+      ["--json", "snapshot"],
       {
         windowsHide: true,
         env: { ...process.env, BSK_CANCEL_ON_STDIN_CLOSE: "1" },

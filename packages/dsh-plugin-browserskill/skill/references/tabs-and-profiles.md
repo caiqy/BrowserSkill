@@ -1,3 +1,27 @@
+## Connected browsers and named sessions
+
+```text
+bsk_session({ action: "browsers" })
+bsk_session({ action: "list" })
+```
+
+`browsers` queries connected official browser instances without creating a session
+or changing selection. It returns only information actually supplied by the daemon
+(such as IDs, names, labels, versions, availability and session counts). An empty
+list means no connected instances were returned; a daemon/query error is a failure.
+`list` still reports only plugin-owned sessions and pending cleanup, not all daemon
+sessions. A connected instance alone does not prove which user profile it represents.
+
+After verifying the required mapping, an optional task `name` labels a new session:
+
+```text
+bsk_session({ action: "start", browser: "<verified-instance-id>", name: "Check account layout" })
+```
+
+Names do not replace returned session IDs or ownership. Named starts use the same
+tracked start journal, recovery and failure cleanup as ordinary starts. If a reply
+is lost, inspect owned sessions/pending cleanup before repeating a start.
+
 ## Required browser profiles
 
 If the user or workspace requires a specific profile, confirm its instance ID before

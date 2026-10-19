@@ -5,9 +5,10 @@
  * the domain tools without exposing one schema per operation to the model.
  */
 
-import { readFile, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import {
@@ -19,6 +20,7 @@ import {
 import { ownerSessionIds } from "./archive-cleanup";
 import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
+import { appendTabId, requireNonEmpty, requirePositive, runnerTimeout } from "./phase-one-runtime";
 import { registerPhaseOneTools } from "./phase-one-tools";
 import type { KeyedExecutor } from "./queue";
 import {
@@ -32,7 +34,13 @@ import {
 } from "./runner";
 import { SessionStarts } from "./session-starts";
 import type { SessionRegistry } from "./sessions";
-import { BROWSER_PARAM, SESSION_PARAM, SESSION_STOP_PARAMS } from "./tool-params";
+import {
+  BROWSER_PARAM,
+  SESSION_PARAM,
+  SESSION_STOP_PARAMS,
+  TAB_ID_PARAM,
+  TIMEOUT_MS_PARAM,
+} from "./tool-params";
 
 /** Plugin configuration resolved from the Schemastery schema in index.ts. */
 export interface PluginConfig {
@@ -64,6 +72,8 @@ export interface ToolDeps {
   starts?: SessionStarts;
 }
 
+type JsonValue = Parameters<ToolDefinition["output"]["render"]>[1];
+
 /** Device presets supported by `bsk emulate --device`. */
 const DEVICE_PRESETS = [
   "iphone-14",
@@ -91,7 +101,7 @@ async function runBsk(
   runnerTimeoutMs?: number,
   initializing = false,
   parseOptions: ParseBskJsonOptions = {},
-): Promise<unknown> {
+): Promise<JsonValue> {
   const releaseForeground =
     observeSession !== undefined ? deps.observation.acquireForeground(observeSession) : undefined;
   // beginAction must fire only when the task actually starts inside the
@@ -136,7 +146,11 @@ async function runBsk(
       error.name = "AbortError";
       throw error;
     }
-    return parseBskJson(result, label, parseOptions);
+    const value = parseBskJson(result, label, parseOptions) as JsonValue;
+    if (args[0] === "evaluate" && (value as { ok?: boolean } | null)?.ok === false) {
+      throw new Error(`evaluate failed: ${JSON.stringify(value)}`);
+    }
+    return value;
   } catch (error) {
     actionError = error instanceof Error ? error.message.split("\n")[0] : String(error);
     throw error;
@@ -183,6 +197,10 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         "its session id. The new session becomes the current session for subsequent bsk_* calls. " +
         "Optionally navigate to an initial URL and/or apply a mobile device emulation preset.",
       parameters: {
+        name: {
+          type: "string",
+          description: "Non-empty task name displayed in local browser operation history.",
+        },
         url: {
           type: "string",
           description: "Initial URL to navigate to after the session starts.",
@@ -234,6 +252,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         ],
       },
       async execute(args, exec) {
+        if (args.name !== undefined) requireNonEmpty(args.name, "name");
         if (args.url !== undefined && args.url.trim().length === 0) {
           throw new Error("url must be a non-empty string");
         }
@@ -246,6 +265,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         await starts.reconcile();
         const record = starts.begin(ownerSessionIds(deps.ctx, exec.agent?.id));
         const startArgs = ["session", "start", "--request-id", record.requestId];
+        if (args.name !== undefined) startArgs.push("--name", args.name);
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }
@@ -351,6 +371,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         title: cmdline(deps, [
           "session",
           "start",
+          ...(args.name !== undefined ? ["--name", args.name] : []),
           ...(args.device !== undefined ? ["+ emulate", args.device] : []),
           ...(args.url !== undefined ? ["+ navigate", args.url] : []),
         ]),
@@ -495,6 +516,27 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
 
   register(
     defineTool({
+      name: "session.browsers",
+      description:
+        "List connected browser instances and their complete official status metadata; no session is required.",
+      parameters: {},
+      output: {
+        schema: { type: "json" },
+        render: (_args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }],
+      },
+      isConcurrencySafe: () => true,
+      execute: (_args, exec) => runBsk(deps, exec, ["browsers"], "browsers"),
+      presentCall: () => ({
+        card: "terminal",
+        title: cmdline(deps, ["browsers"]),
+        description: "List connected browser instances",
+      }),
+      presentResult: presentTerminalResult,
+    }),
+  );
+
+  register(
+    defineTool({
       name: "page.navigate",
       description:
         "Navigate the session's active tab to a URL and wait for a page lifecycle phase " +
@@ -573,18 +615,29 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       ? "Capture an indented aria-tree snapshot of the session's active tab. Interactive elements " +
         "carry @eN refs for bsk_interact actions. Prefer bsk_inspect action=observe for a richer semantic view."
       : "Produce a semantic VOM observation of the session's active tab (roles, states, perception " +
-        "probes) with @eN refs for bsk_interact actions. Read-only: never submits input.";
+        "probes) with @eN refs for bsk_interact actions. Active hover probing is opt-in and moves the real cursor.";
     register(
       defineTool({
         name,
         description,
         parameters: {
           session: SESSION_PARAM,
+          tabId: TAB_ID_PARAM,
           ...(kind === "observe"
             ? {
                 cursor: {
                   type: "string" as const,
-                  description: "Continue omitted content; previous page refs expire.",
+                  description:
+                    "Continue omitted content; incompatible with maxDepth and active probe flags.",
+                },
+                probeHover: {
+                  type: "boolean" as const,
+                  description:
+                    "Actively hover controls to reveal hidden content (default false); moves the real cursor.",
+                },
+                debugSurfaces: {
+                  type: "boolean" as const,
+                  description: "Include surface probe diagnostics (default false).",
                 },
               }
             : {}),
@@ -605,27 +658,51 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               refCount: { type: "integer", required: true },
               truncated: { type: "boolean", required: true },
               nextCursor: { type: "string" },
+              hoverProbe: { type: "json" },
+              debug: { type: "json" },
+              dialogs: { type: "json" },
             },
           },
           render: (_args, value) => [
             {
               type: "text",
               text:
-                value.text.length > 0
+                (value.text.length > 0
                   ? value.text +
                     (value.truncated && !value.nextCursor
                       ? "\n(truncated — re-run with looser caps)"
                       : "")
-                  : "(empty observation — page may still be loading)",
+                  : "(empty observation — page may still be loading)") +
+                (value.nextCursor ? `\nnextCursor=${value.nextCursor}` : "") +
+                (value.hoverProbe !== undefined
+                  ? `\nhoverProbe=${JSON.stringify(value.hoverProbe)}`
+                  : "") +
+                (value.debug !== undefined ? `\ndebug=${JSON.stringify(value.debug)}` : "") +
+                (value.dialogs !== undefined ? `\ndialogs=${JSON.stringify(value.dialogs)}` : ""),
             },
           ],
         },
-        isConcurrencySafe: () => true,
+        isConcurrencySafe: (args) => isSnapshot || args.probeHover !== true,
         async execute(args, exec) {
+          if (kind === "observe" && args.cursor !== undefined) {
+            requireNonEmpty(args.cursor, "cursor");
+            if (
+              args.maxDepth !== undefined ||
+              args.probeHover === true ||
+              args.debugSurfaces === true
+            ) {
+              throw new Error(
+                "cursor is mutually exclusive with maxDepth/probeHover/debugSurfaces",
+              );
+            }
+          }
           const sessionId = registry.resolve(args.session, name);
           const cmdArgs = [kind, "--session", sessionId];
+          appendTabId(cmdArgs, args.tabId);
           if (kind === "observe" && args.cursor !== undefined)
-            cmdArgs.push("--cursor", String(args.cursor));
+            cmdArgs.push("--cursor", args.cursor);
+          if (kind === "observe" && args.probeHover === true) cmdArgs.push("--probe-hover");
+          if (kind === "observe" && args.debugSurfaces === true) cmdArgs.push("--debug-surfaces");
           if (args.maxDepth !== undefined) cmdArgs.push("--max-depth", String(args.maxDepth));
           if (args.maxTokens !== undefined) cmdArgs.push("--max-tokens", String(args.maxTokens));
           const reply = (await runBsk(deps, exec, cmdArgs, kind, sessionId)) as {
@@ -634,6 +711,9 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             tab_id: number;
             truncated?: boolean;
             next_cursor?: string;
+            hover_probe?: JsonValue;
+            debug?: JsonValue;
+            dialogs?: JsonValue;
           };
           return {
             session: sessionId,
@@ -642,6 +722,9 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             refCount: reply.ref_count,
             truncated: reply.truncated ?? false,
             ...(reply.next_cursor ? { nextCursor: reply.next_cursor } : {}),
+            ...(reply.hover_probe !== undefined ? { hoverProbe: reply.hover_probe } : {}),
+            ...(reply.debug !== undefined ? { debug: reply.debug } : {}),
+            ...(reply.dialogs !== undefined ? { dialogs: reply.dialogs } : {}),
           };
         },
         presentCall: (args) => ({
@@ -880,13 +963,29 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
     defineTool({
       name: "inspect.screenshot",
       description:
-        "Capture a PNG screenshot of the session's active tab, or crop to a snapshot ref element. " +
-        "Returns the image itself when the deployment supports image input, otherwise a file path.",
+        "Capture a viewport, ref crop or full-page PNG. Full-page capture may scroll the page. " +
+        "Returns an image preview when supported. An explicit output is a new file and remains saved.",
       parameters: {
         session: SESSION_PARAM,
+        tabId: TAB_ID_PARAM,
         ref: {
           type: "string",
-          description: "Snapshot ref (@e3) from the last snapshot/observe; crops to that element.",
+          description:
+            "Snapshot ref (@e3) from the last snapshot/observe; incompatible with fullPage.",
+        },
+        fullPage: {
+          type: "boolean",
+          description: "Scroll and stitch the full page (default false).",
+        },
+        scope: {
+          type: "string",
+          enum: ["current", "follow"],
+          description: "Full-page range; requires fullPage=true.",
+        },
+        timeoutMs: TIMEOUT_MS_PARAM,
+        output: {
+          type: "string",
+          description: "New PNG destination on this host; existing files are never overwritten.",
         },
       },
       output: {
@@ -902,6 +1001,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             byteSize: { type: "integer", required: true },
             captureId: { type: "string" },
             captureUnavailable: { type: "string" },
+            savedTo: { type: "string" },
+            scope: { type: "string" },
             image: {
               type: "object",
               additionalProperties: false,
@@ -930,7 +1031,12 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             : value.captureUnavailable
               ? `; capture unavailable: ${value.captureUnavailable}`
               : "";
-          const blocks: ContentBlock[] = [{ type: "text", text: text + captureText }];
+          const blocks: ContentBlock[] = [
+            {
+              type: "text",
+              text: text + captureText + (value.savedTo ? `; saved to ${value.savedTo}` : ""),
+            },
+          ];
           if (value.image !== undefined) {
             blocks.push({
               type: "image",
@@ -948,22 +1054,42 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           return blocks;
         },
       },
-      isConcurrencySafe: () => true,
+      isConcurrencySafe: (args) => args.fullPage !== true,
       async execute(args, exec) {
+        if (args.ref !== undefined) requireNonEmpty(args.ref, "ref");
+        if (args.output !== undefined) requireNonEmpty(args.output, "output");
+        if (args.fullPage === true && args.ref !== undefined) {
+          throw new Error("fullPage is mutually exclusive with ref");
+        }
+        if (args.fullPage !== true && (args.scope !== undefined || args.timeoutMs !== undefined)) {
+          throw new Error("scope/timeoutMs require fullPage=true");
+        }
+        requirePositive(args.timeoutMs, "timeoutMs");
         const sessionId = registry.resolve(args.session, "bsk_inspect(action=screenshot)");
         const outPath = join(
           tmpdir(),
           `bsk-screenshot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`,
         );
         const cmdArgs = ["screenshot", "--session", sessionId, "--out", outPath];
+        appendTabId(cmdArgs, args.tabId);
         if (args.ref !== undefined) cmdArgs.push("--ref", args.ref);
+        if (args.fullPage === true) cmdArgs.push("--full-page");
+        if (args.scope !== undefined) cmdArgs.push("--scope", args.scope);
+        if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
         // The scratch PNG is only kept when it IS the model-facing artifact
         // (no attachment store to inline through); once the bytes are saved
         // into the store — and on every failure/abort path — it is deleted.
         let keepFile = false;
         let writtenPath: string | undefined;
         try {
-          const reply = (await runBsk(deps, exec, cmdArgs, "screenshot", sessionId)) as {
+          const reply = (await runBsk(
+            deps,
+            exec,
+            cmdArgs,
+            "screenshot",
+            sessionId,
+            args.fullPage === true ? runnerTimeout(deps, args.timeoutMs ?? 120_000) : undefined,
+          )) as {
             tab_id: number;
             width: number;
             height: number;
@@ -971,16 +1097,22 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             byte_size: number;
             capture_id?: string;
             capture_unavailable?: string;
+            scope?: string;
           };
           writtenPath = reply.path;
           const data = await readFile(reply.path);
           if (exec.signal.aborted) throw abortError();
           const ref = await trySaveScreenshot(deps.ctx, exec, data, `screenshot-${sessionId}.png`);
-          keepFile = ref === undefined;
+          if (exec.signal.aborted) throw abortError();
+          const savedTo = args.output === undefined ? undefined : resolve(args.output);
+          if (savedTo !== undefined) await copyFile(reply.path, savedTo, constants.COPYFILE_EXCL);
+          keepFile = savedTo === undefined && ref === undefined;
           return {
             session: sessionId,
             tabId: reply.tab_id,
-            path: reply.path,
+            path: savedTo ?? reply.path,
+            ...(savedTo !== undefined ? { savedTo } : {}),
+            ...(reply.scope !== undefined ? { scope: reply.scope } : {}),
             width: reply.width,
             height: reply.height,
             byteSize: reply.byte_size,
@@ -1025,20 +1157,37 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         "user agent, and touch. Overrides are per-tab and not inherited by new tabs.",
       parameters: {
         session: SESSION_PARAM,
+        tabId: TAB_ID_PARAM,
         device: {
           type: "string",
           enum: DEVICE_PRESETS,
-          description: "Built-in device preset.",
+          description:
+            "Built-in preset; manual values override it and may supply only one dimension.",
         },
-        width: { type: "integer", description: "Viewport width in CSS pixels (requires height)." },
-        height: { type: "integer", description: "Viewport height in CSS pixels (requires width)." },
+        width: { type: "integer", description: "Viewport width in CSS pixels (1..7680)." },
+        height: { type: "integer", description: "Viewport height in CSS pixels (1..7680)." },
         mobile: {
           type: "boolean",
-          description:
-            "Emulate a mobile viewport. Requires width+height — the bsk daemon refuses " +
-            "--mobile without viewport dimensions, so this flag cannot be used alone.",
+          description: "Mobile viewport, including explicit false; requires dimensions or device.",
         },
-        off: { type: "boolean", description: "Clear every emulation override on the tab." },
+        dpr: {
+          type: "number",
+          description: "Positive finite pixel ratio; requires dimensions or device.",
+        },
+        ua: { type: "string", description: "User-Agent override; dimensions are optional." },
+        acceptLanguage: {
+          type: "string",
+          description: "Accept-Language override; requires ua or device.",
+        },
+        touch: { type: "boolean", description: "Touch emulation, including explicit false." },
+        maxTouchPoints: {
+          type: "integer",
+          description: "Positive touch point count (implies touch unless explicitly false).",
+        },
+        off: {
+          type: "boolean",
+          description: "Clear overrides; mutually exclusive with every emulation option.",
+        },
       },
       output: {
         schema: {
@@ -1061,27 +1210,71 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       },
       async execute(args, exec) {
         const sessionId = registry.resolve(args.session, "bsk_assist(action=emulate)");
-        if (args.off === true) {
-          if (args.device !== undefined || args.width !== undefined || args.height !== undefined) {
-            throw new Error("off is mutually exclusive with device/width/height");
-          }
-        } else if (args.device === undefined && args.width === undefined) {
-          throw new Error(
-            "nothing to apply: pass device or width+height (mobile also requires width+height), or off",
-          );
+        const overrides = [
+          args.device,
+          args.width,
+          args.height,
+          args.mobile,
+          args.dpr,
+          args.ua,
+          args.acceptLanguage,
+          args.touch,
+          args.maxTouchPoints,
+        ];
+        if (args.off === true && overrides.some((value) => value !== undefined)) {
+          throw new Error("off is mutually exclusive with emulation overrides");
         }
-        if ((args.width === undefined) !== (args.height === undefined)) {
-          throw new Error("width and height must be given together");
+        if (args.off !== true && overrides.every((value) => value === undefined)) {
+          throw new Error("nothing to apply: pass device, manual emulation options, or off");
+        }
+        for (const [name, value] of [
+          ["width", args.width],
+          ["height", args.height],
+        ] as const) {
+          if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 7680)) {
+            throw new Error(`${name} must be an integer in 1..7680`);
+          }
+        }
+        if (args.dpr !== undefined && (!Number.isFinite(args.dpr) || args.dpr <= 0)) {
+          throw new Error("dpr must be positive and finite");
+        }
+        if (
+          args.maxTouchPoints !== undefined &&
+          (!Number.isInteger(args.maxTouchPoints) ||
+            args.maxTouchPoints < 1 ||
+            args.maxTouchPoints > 4_294_967_295)
+        ) {
+          throw new Error("maxTouchPoints must be an integer in 1..4294967295");
+        }
+        if (args.device === undefined) {
+          if ((args.width === undefined) !== (args.height === undefined)) {
+            throw new Error("width and height must be given together unless device supplies them");
+          }
+          if (args.width === undefined && (args.dpr !== undefined || args.mobile !== undefined)) {
+            throw new Error("dpr/mobile require width/height or device");
+          }
+          if (args.acceptLanguage !== undefined && args.ua === undefined) {
+            throw new Error("acceptLanguage requires ua or device");
+          }
         }
         const cmdArgs = ["emulate", "--session", sessionId];
+        appendTabId(cmdArgs, args.tabId);
         if (args.off === true) {
           cmdArgs.push("--off");
         } else {
-          if (args.device !== undefined) cmdArgs.push("--device", args.device);
-          if (args.width !== undefined && args.height !== undefined) {
-            cmdArgs.push("--width", String(args.width), "--height", String(args.height));
+          for (const [flag, value] of [
+            ["device", args.device],
+            ["width", args.width],
+            ["height", args.height],
+            ["dpr", args.dpr],
+            ["ua", args.ua],
+            ["accept-language", args.acceptLanguage],
+            ["max-touch-points", args.maxTouchPoints],
+          ] as const) {
+            if (value !== undefined) cmdArgs.push(`--${flag}`, String(value));
           }
-          if (args.mobile === true) cmdArgs.push("--mobile");
+          if (args.mobile !== undefined) cmdArgs.push(args.mobile ? "--mobile" : "--no-mobile");
+          if (args.touch !== undefined) cmdArgs.push(args.touch ? "--touch" : "--no-touch");
         }
         const reply = (await runBsk(deps, exec, cmdArgs, "emulate", sessionId)) as {
           tab_id: number;

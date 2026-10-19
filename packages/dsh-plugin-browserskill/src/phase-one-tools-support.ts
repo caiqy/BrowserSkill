@@ -1,3 +1,5 @@
+import { open, unlink } from "node:fs/promises";
+import { resolve } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
   appendTabId,
@@ -302,6 +304,10 @@ export function registerPhaseOneSupportTools(
           type: "integer",
           description: "Maximum returned HTML bytes before truncation (default: 524288).",
         },
+        output: {
+          type: "string",
+          description: "Export to a new local file; returns metadata instead of HTML.",
+        },
       },
       output: {
         schema: {
@@ -310,7 +316,9 @@ export function registerPhaseOneSupportTools(
           properties: {
             session: { type: "string", required: true },
             tabId: { type: "integer", required: true },
-            html: { type: "string", required: true },
+            html: { type: "string" },
+            path: { type: "string" },
+            writtenBytes: { type: "integer" },
             truncated: { type: "boolean", required: true },
             byteSize: { type: "integer", required: true },
           },
@@ -319,13 +327,16 @@ export function registerPhaseOneSupportTools(
           {
             type: "text",
             text:
-              value.html +
+              (value.path !== undefined
+                ? `[session ${value.session}] HTML saved to ${value.path} (${value.writtenBytes} bytes; original ${value.byteSize} bytes)`
+                : (value.html ?? "")) +
               (value.truncated ? `\n(HTML truncated; original size ${value.byteSize} bytes)` : ""),
           },
         ],
       },
-      isConcurrencySafe: () => true,
+      isConcurrencySafe: (args) => args.output === undefined,
       async execute(args, exec) {
+        if (args.output !== undefined) requireNonEmpty(args.output, "output");
         if (args.ref !== undefined) {
           requireNonEmpty(args.ref, "ref");
           if (!isSnapshotRef(args.ref)) throw new Error("ref must be a snapshot ref such as @e3");
@@ -342,13 +353,26 @@ export function registerPhaseOneSupportTools(
           truncated?: boolean;
           byte_size: number;
         };
-        return {
+        const metadata = {
           session: sessionId,
           tabId: reply.tab_id,
-          html: reply.html,
           truncated: reply.truncated ?? false,
           byteSize: reply.byte_size,
         };
+        if (args.output === undefined) return { ...metadata, html: reply.html };
+        exec.signal.throwIfAborted();
+        const path = resolve(args.output);
+        const file = await open(path, "wx");
+        try {
+          await file.writeFile(reply.html, { encoding: "utf8", signal: exec.signal });
+          await file.close();
+          exec.signal.throwIfAborted();
+        } catch (error) {
+          await file.close().catch(() => {});
+          await unlink(path).catch(() => {});
+          throw error;
+        }
+        return { ...metadata, path, writtenBytes: Buffer.byteLength(reply.html, "utf8") };
       },
       presentCall: (args) => ({
         card: "terminal",

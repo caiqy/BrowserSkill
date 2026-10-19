@@ -29,7 +29,7 @@ const { output: extractOutput, ...extractParameters } = EXTRACT_PARAMETERS;
 const INSPECT_OUTPUT = {
   type: debugOutput.type satisfies typeof videoOutput.type & typeof extractOutput.type,
   description:
-    "Debug export: new local JSON path. Video save: explicit MP4 destination chosen by the user; omit to preview and Save As in the extension. Video replacement requires overwrite=true. Extract: new JSON/CSV file on the CLI host; required for CSV.",
+    "Screenshot/HTML: new local file only; screenshot still attaches a preview, HTML returns export metadata. Debug export: new local JSON path. Video save: explicit MP4 destination chosen by the user; omit to preview and Save As in the extension. Video replacement requires overwrite=true. Extract: new JSON/CSV file on the CLI host; required for CSV.",
 } as const;
 
 const DEVICE_PRESETS = [
@@ -121,7 +121,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.session,
     description:
       "Manage plugin-owned browser sessions. Actions: start opens an Agent Window; stop closes an " +
-      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus are " +
+      "owned session; list returns owned sessions; browsers lists connected browser instances. For start, name/url/device/width/height/noFocus are " +
       "optional. When a specific profile is required, always set browser to its verified instance " +
       "ID or unique label, even with one connected browser; stop if the target is unknown or " +
       "unavailable instead of omitting or changing browser. For stop, specify session or requestId " +
@@ -132,9 +132,11 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       start: "session.start",
       stop: "session.stop",
       list: "session.list",
+      browsers: "session.browsers",
     },
     parameters: {
       ...SESSION_STOP_PARAMS,
+      name: { type: "string", description: "Optional task name for start." },
       url: { type: "string", description: "Initial URL for start." },
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
@@ -151,10 +153,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.page,
     description:
       "Navigate and wait on the active Agent Window tab. Actions: navigate, back, forward, reload, " +
-      "wait, wait-for-element. navigate requires url; reload optionally accepts hard; navigation " +
+      "wait, wait-for-element, wait-ms. navigate requires url; reload optionally accepts hard; navigation " +
       "actions and wait accept waitUntil/timeoutMs. wait-for-element requires target and accepts " +
       "state/pollMs; its timeoutMs defaults to 10000 (max 300000). Check satisfied: false means " +
-      "timeout, not success. Observe again after a meaningful page change before reusing refs.",
+      "timeout, not success. wait-ms requires durationMs (0..300000), needs no session, and is a fixed delay. Observe again after a meaningful page change before reusing refs.",
     actions: {
       navigate: "page.navigate",
       back: "page.back",
@@ -162,6 +164,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       reload: "page.reload",
       wait: "page.wait",
       "wait-for-element": "page.wait-for-element",
+      "wait-ms": "page.wait-ms",
     },
     parameters: {
       session: SESSION_PARAM,
@@ -171,6 +174,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       timeoutMs: TIMEOUT_MS_PARAM,
       hard: { type: "boolean", description: "Bypass cache for reload." },
       ...ELEMENT_WAIT_PARAMS,
+      durationMs: {
+        type: "integer",
+        description: "wait-ms: fixed delay in milliseconds, 0..300000; no session required.",
+      },
     },
   },
   {
@@ -216,13 +223,33 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       },
       maxTextChars: { type: "integer", description: "Console/network per-entry text cap." },
       includeStack: { type: "boolean", description: "Include console stack frames." },
+      probeHover: {
+        type: "boolean",
+        description:
+          "observe: actively probe hover surfaces; may trigger page activity (default false).",
+      },
+      debugSurfaces: {
+        type: "boolean",
+        description: "observe: include surface diagnostics (default false).",
+      },
+      fullPage: {
+        type: "boolean",
+        description:
+          "screenshot: capture the full page; incompatible with ref; may scroll the page.",
+      },
+      scope: {
+        type: "string",
+        enum: ["current", "follow"],
+        description: "Full-page screenshot scope; requires fullPage=true.",
+      },
+      timeoutMs: TIMEOUT_MS_PARAM,
     },
   },
   {
     name: toolNames.interact,
     description:
       "Interact with the active Agent Window tab. Actions: click, hover, wheel, scroll-to, focus, blur, fill, select, " +
-      "press. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
+      "press, evaluate, upload, download. evaluate requires expression and can change the page; upload requires target and nonempty files; download requires target/output and defaults to no overwrite. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
       "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
       click: "interact.click",
@@ -234,6 +261,9 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       fill: "interact.fill",
       select: "interact.select",
       press: "interact.press",
+      evaluate: "interact.evaluate",
+      upload: "interact.upload",
+      download: "interact.download",
     },
     parameters: {
       session: SESSION_PARAM,
@@ -271,6 +301,34 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       },
       key: { type: "string", description: "Key or combo for press." },
       holdMs: { type: "integer", description: "Key hold duration for press." },
+      expression: {
+        type: "string",
+        description: "evaluate: JavaScript expression; use an IIFE for statements.",
+      },
+      awaitPromise: {
+        type: "boolean",
+        description: "evaluate: await Promise resolution (default true).",
+      },
+      returnByValue: {
+        type: "boolean",
+        description: "evaluate: return a serialized value (default true).",
+      },
+      files: {
+        type: "array",
+        items: { type: "string" },
+        description: "upload: nonempty list of local files on this host.",
+      },
+      mode: {
+        type: "string",
+        enum: ["input", "drop"],
+        description: "upload: file input/chooser or drop target (default input).",
+      },
+      output: { type: "string", description: "download: destination file on this host." },
+      overwrite: {
+        type: "boolean",
+        description:
+          "download: replace an existing file only when explicitly authorized (default false).",
+      },
     },
   },
   {
@@ -304,7 +362,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.assist,
     description:
       "Display and human-assistance operations. Actions: resize, emulate, request-help. resize " +
-      "requires width/height; emulate accepts device or width/height/mobile, or off alone; " +
+      "requires width/height; emulate accepts a device preset, viewport and/or UA/language/touch overrides, or off alone; " +
       "request-help requires prompt and can wait for explicit completion criteria.",
     actions: {
       resize: "assist.resize",
@@ -317,7 +375,32 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       width: { type: "integer", description: "Window/viewport width." },
       height: { type: "integer", description: "Window/viewport height." },
       device: { type: "string", enum: DEVICE_PRESETS, description: "Emulation device preset." },
-      mobile: { type: "boolean", description: "Enable a mobile viewport with width/height." },
+      mobile: {
+        type: "boolean",
+        description:
+          "Emulate a mobile/desktop viewport, including explicit false; dimensions may come from device.",
+      },
+      dpr: {
+        type: "number",
+        description: "Device pixel ratio; requires dimensions or a device preset.",
+      },
+      ua: {
+        type: "string",
+        description: "User agent override; can be used without viewport dimensions.",
+      },
+      acceptLanguage: {
+        type: "string",
+        description:
+          "Accept-Language override; requires ua or device, with no viewport requirement.",
+      },
+      touch: {
+        type: "boolean",
+        description: "Enable or disable touch; explicit false clears touch emulation.",
+      },
+      maxTouchPoints: {
+        type: "integer",
+        description: "Maximum touch points when touch is enabled (default 5).",
+      },
       off: { type: "boolean", description: "Clear emulation; use alone." },
       prompt: { type: "string", description: "Instructions shown to the user for request-help." },
       title: { type: "string", description: "Optional request-help title." },
