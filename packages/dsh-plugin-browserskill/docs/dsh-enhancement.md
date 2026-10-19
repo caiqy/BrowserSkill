@@ -47,12 +47,14 @@ bsk_session({ action: "stop", session: "<id>" })
 corepack pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck
 corepack pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test
 corepack pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
-corepack pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin lint:publint
 node scripts/check-dsh-package.mjs
-corepack pnpm -C packages/dsh-plugin-browserskill pack --pack-destination .
+npm pack ./packages/dsh-plugin-browserskill --ignore-scripts --pack-destination .
+corepack pnpm dlx publint@0.3.25 run ./wxg-prc-cpg-browser-skill-dsh-plugin-0.3.3-dsh.1.tgz
 ```
 
-pack 的 prepack 会再次执行原构建，生成 `wxg-prc-cpg-browser-skill-dsh-plugin-0.3.3-dsh.1.tgz`；按实际命令输出确认位置。包保留 lib、skill、patch、LICENSE 和客户端资源。check-dsh-package 在无关 cwd 检查实际归档及技能资源解析，使用 fake runner，不替代浏览器实测。技能入口含 frontmatter 的 UTF-8 总大小仍限 4500 字节，各 references 必须从入口直接路由；构建器生成内容，不手改生成文件。
+官方基线虽有 `lint:publint` 脚本，却未声明或安装 publint；上方用固定版本的临时 dlx 工具执行相同检查，不改项目依赖或锁文件。官方客户端 CSS 构建的 classMap 键顺序不固定，重复构建可能仅此处字节不同；交付一致性检查只对这些纯字符串 CSS 映射排序后比较，其他客户端代码及 runtime、类型、skill 和包元数据保持逐字节检查。
+
+先完成 build，再用上方 `npm pack --ignore-scripts` 从当前生成物打包到 workspace 根，随后 publint 直接检查该 tgz；避免 dlx 的 cwd/包管理器推断选中 monorepo 根包。常规 pack 的 prepack 会重复构建，当前流程已显式完成构建，因此关闭脚本。生成文件为 `wxg-prc-cpg-browser-skill-dsh-plugin-0.3.3-dsh.1.tgz`；按实际命令输出确认位置。包保留 lib、skill、patch、LICENSE 和客户端资源。check-dsh-package 在无关 cwd 检查实际归档及技能资源解析，使用 fake runner，不替代浏览器实测。技能入口含 frontmatter 的 UTF-8 总大小仍限 4500 字节，各 references 必须从入口直接路由；构建器生成内容，不手改生成文件。
 
 开发中仅核对技能时可使用：
 
