@@ -352,7 +352,7 @@ export function armLazyTools(ctx: Context, registerSuite: () => () => void): () 
               content: [{ type: "text", text }],
               source: {
                 kind: "plugin",
-                plugin: "@wxg-prc-cpg/browser-skill-dsh-plugin",
+                plugin: "@caiqy/browser-skill-dsh-plugin",
                 form: "notice",
                 summary:
                   suiteDisposer === undefined

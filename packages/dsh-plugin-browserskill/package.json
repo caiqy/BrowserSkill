@@ -1,7 +1,7 @@
 {
-  "name": "@wxg-prc-cpg/browser-skill-dsh-plugin",
+  "name": "@caiqy/browser-skill-dsh-plugin",
   "description": "DeepSeek Harness tool plugin that exposes BrowserSkill browser automation (bsk_* tools) to the model",
-  "version": "0.3.3-dsh.1",
+  "version": "0.3.3-dsh.2",
   "license": "MIT",
   "publishConfig": {
     "access": "public",
@@ -9,12 +9,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Tencent/BrowserSkill.git",
+    "url": "git+https://github.com/caiqy/BrowserSkill.git",
     "directory": "packages/dsh-plugin-browserskill"
   },
-  "homepage": "https://github.com/Tencent/BrowserSkill/tree/main/packages/dsh-plugin-browserskill#readme",
+  "homepage": "https://github.com/caiqy/BrowserSkill/tree/dsh/plugin-parity-0.3.3/packages/dsh-plugin-browserskill#readme",
   "bugs": {
-    "url": "https://github.com/Tencent/BrowserSkill/issues"
+    "url": "https://github.com/caiqy/BrowserSkill/issues"
   },
   "keywords": [
     "dsh-plugin",

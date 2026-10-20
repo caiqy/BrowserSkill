@@ -28,7 +28,7 @@ beforeAll(async () => {
       [
         createRequire(import.meta.url).resolve("tsdown/run"),
         "--filter",
-        "@wxg-prc-cpg/browser-skill-dsh-plugin/client",
+        "@caiqy/browser-skill-dsh-plugin/client",
         "--out-dir",
         output,
       ],
@@ -56,7 +56,8 @@ function setupClient() {
   let client!: { apply(ctx: unknown): void };
   new Function("window", source)({
     __ModuleLoader__: {
-      load: ({ factory }: { factory: (require: (id: string) => unknown) => typeof client }) => {
+      load: ({ id, factory }: { id: string; factory: (require: (id: string) => unknown) => typeof client }) => {
+        expect(id).toBe("@caiqy/browser-skill-dsh-plugin");
         client = factory((id) => {
           if (!(id in host)) throw new Error(`Unexpected client external: ${id}`);
           return host[id];

@@ -26,7 +26,7 @@ import { armAgentScopedBskSkill, registerBskSkill } from "./skill";
 import { DiskStartJournal, defaultStartJournalDirectory, type StartJournal } from "./start-journal";
 import type { PluginConfig, ToolDeps } from "./tools";
 
-export const name = "@wxg-prc-cpg/browser-skill-dsh-plugin";
+export const name = "@caiqy/browser-skill-dsh-plugin";
 export const inject = ["tools"];
 
 /** Runtime configuration schema (validated and defaulted by Cordis). */

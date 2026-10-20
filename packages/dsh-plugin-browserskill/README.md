@@ -1,15 +1,18 @@
 # BrowserSkill for DeepSeek Harness
 
-[![npm version](https://img.shields.io/npm/v/@wxg-prc-cpg/browser-skill-dsh-plugin)](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+[![npm version](https://img.shields.io/npm/v/@caiqy/browser-skill-dsh-plugin)](https://www.npmjs.com/package/@caiqy/browser-skill-dsh-plugin)
 
 Use [BrowserSkill](https://github.com/Tencent/BrowserSkill) in
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) to browse
 websites, fill forms, and capture screenshots through native `bsk_*` tools.
 Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
-This branch carries the local `0.3.3-dsh.1` enhancement over official `0.3.3`.
-See [DSH enhancement delivery notes](docs/dsh-enhancement.md) for the baseline,
-structured examples, build/rollback steps and actual verification boundaries.
+This fork publishes `0.3.3-dsh.2` as `@caiqy/browser-skill-dsh-plugin`, carrying
+the local enhancements over official `0.3.3`. The official package remains
+`@wxg-prc-cpg/browser-skill-dsh-plugin`. Install only one of the two packages in a
+profile: they register the same `bsk_*` tools and observation routes.
+See [DSH enhancement delivery notes](https://github.com/caiqy/BrowserSkill/blob/dsh/plugin-parity-0.3.3/packages/dsh-plugin-browserskill/docs/dsh-enhancement.md)
+for the baseline, structured examples and actual verification boundaries.
 
 ## Installation
 
@@ -24,7 +27,7 @@ Before installing the plugin:
 Install the plugin into the `web` profile, then start it:
 
 ```sh
-dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
+dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.2
 dsh --profile web
 ```
 
@@ -48,15 +51,15 @@ baseline and admits 0.2.x without opting into future 0.3.x hosts.
 
 ## Updating
 
-Installed plugins do not update automatically. To upgrade this plugin to npm's
-`latest` version, including versions outside the profile's saved dependency range:
+Installed plugins do not update automatically. Install this exact fork release:
 
 ```sh
-dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
+dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.2
 ```
 
-For this local enhancement, updating from official npm replaces the local patch;
-follow the [manual update/rollback procedure](docs/dsh-enhancement.md#更新与回退).
+To follow the fork's current release, install `@caiqy/browser-skill-dsh-plugin@dsh`.
+The fork publishes prereleases under the npm `dsh` dist-tag.
+See the [manual update/rollback procedure](https://github.com/caiqy/BrowserSkill/blob/dsh/plugin-parity-0.3.3/packages/dsh-plugin-browserskill/docs/dsh-enhancement.md#更新与回退).
 Restart that dsh profile after upgrading. This command updates the plugin; update
 the `bsk` CLI and browser extension separately when a release requires it.
 
@@ -256,9 +259,9 @@ The observation endpoints require a loopback address such as `localhost` or
 
 ```sh
 pnpm install
-pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck
-pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test     # unit tests mock bsk; no browser needed
-pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build    # tsdown -> lib/
+pnpm --filter @caiqy/browser-skill-dsh-plugin typecheck
+pnpm --filter @caiqy/browser-skill-dsh-plugin test     # unit tests mock bsk; no browser needed
+pnpm --filter @caiqy/browser-skill-dsh-plugin build    # tsdown -> lib/
 ```
 
 See the [development notes](https://github.com/Tencent/BrowserSkill/blob/main/packages/dsh-plugin-browserskill/docs/development.md)
@@ -266,44 +269,19 @@ for skill registration, tool results, and observation APIs in the current source
 
 ## Publishing
 
-The [Release dsh plugin workflow](https://github.com/Tencent/BrowserSkill/blob/main/.github/workflows/release-dsh-plugin.yml)
-publishes the package and this README to npm. Pushing a `dsh-plugin-vX.Y.Z` tag
-triggers it; ordinary commits to `main` do not.
+This fork is published manually from the independent BrowserSkill workspace.
+Run the package's typecheck, build and tests, then `node scripts/check-dsh-package.mjs`.
+Pack the built package with `npm pack --ignore-scripts` and publish the inspected
+archive with `npm publish <archive.tgz> --access public --tag dsh --registry=https://registry.npmjs.org/`.
 
-Before publishing the 0.3.3 plugin, publish the coordinated 0.3.3 CLI and extension.
-Element waits require the implementation introduced in [#407](https://github.com/Tencent/BrowserSkill/pull/407).
-The `cli-v0.3.0`, `cli-v0.3.1`, and `cli-v0.3.2` releases do not include this
-command. Confirm the compatible CLI and extension release artifacts are available
-before pushing the plugin tag; publishing the npm package alone does not upgrade
-either component on users' machines. Older installations can still use the
-[single-action recovery path](skill/references/interaction-details.md#element-waits).
+Publish only `@caiqy/browser-skill-dsh-plugin`; the official
+`@wxg-prc-cpg/browser-skill-dsh-plugin` package is maintained upstream.
+Use the `caiqy-dsh-plugin-v<version>` tag for fork releases, which does not trigger
+the inherited upstream release workflow. Push the fork commit before updating the
+parent workspace's submodule pointer and market index.
 
-1. Prepare a release PR that updates the shared CLI, extension and plugin version,
-   local Cargo lock entries, changelog and relevant documentation. Merge it after
-   validation and record the merge commit.
-2. Tag that commit as `ext-v<version>` and wait for the browser extension to become
-   available. Then tag the same commit as `cli-v<version>` and wait for the complete
-   CLI release, including [Windows signing](../../docs/windows-signing.md).
-3. Create `dsh-plugin-v<version>` on that same merge commit and push only that tag:
-
-   ```sh
-   git tag -a dsh-plugin-v<version> <merge-commit> -m "Release DSH plugin <version>"
-   git -c push.followTags=false push origin refs/tags/dsh-plugin-v<version>
-   ```
-
-4. Approve the `npm-publish` environment deployment in GitHub Actions when required,
-   then verify the published npm version and `latest` dist-tag.
-
-The workflow checks the version, runs typechecks and tests, builds the package,
-and publishes it to npm.
-
-You can also run the workflow manually from GitHub Actions on the intended release
-ref. Both triggers require an unpublished version and the `NPM_TOKEN` secret in the
-`npm-publish` GitHub Environment.
-
-npm updates the package README only when a new version is published, including
-for documentation-only changes. Published versions cannot be overwritten. See
-[npm's README update rules](https://docs.npmjs.com/about-package-readme-files/).
+Keep the official 0.3.3 CLI and extension installed separately. Publishing this
+plugin does not update those components. Published npm versions cannot be overwritten.
 
 ## License
 

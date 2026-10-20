@@ -17,8 +17,10 @@ const pkg = JSON.parse(
 
 describe("plugin identity", () => {
   it("uses the published package name as the Cordis plugin id", () => {
-    expect(name).toBe("@wxg-prc-cpg/browser-skill-dsh-plugin");
+    expect(name).toBe("@caiqy/browser-skill-dsh-plugin");
     expect(name).toBe(pkg.name);
+    const patch = readFileSync(new URL("../cordis.patch.yml", import.meta.url), "utf8");
+    expect(patch).toContain(`name: "${pkg.name}"`);
   });
 
   it("declares client require()s so dsh arrives them before materialize", () => {
