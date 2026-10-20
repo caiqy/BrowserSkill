@@ -2,107 +2,120 @@ name: Release dsh plugin
 
 on:
   push:
-    tags:
-      - dsh-plugin-v*
+    tags: ['caiqy-dsh-plugin-v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version already committed in package.json
+        required: true
+        type: string
+      dry_run:
+        description: Build and package only; do not publish
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-dsh-plugin-${{ github.ref }}
+  group: release-caiqy-dsh-plugin
   cancel-in-progress: false
 
 env:
-  PACKAGE_NAME: "@wxg-prc-cpg/browser-skill-dsh-plugin"
+  PACKAGE_NAME: '@caiqy/browser-skill-dsh-plugin'
   PACKAGE_DIR: packages/dsh-plugin-browserskill
 
 jobs:
-  resolve:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Resolve plugin version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="$(node -p "require('./${{ env.PACKAGE_DIR }}/package.json').version")"
-          else
-            VERSION="${GITHUB_REF_NAME#dsh-plugin-v}"
-          fi
-          VERSION="${VERSION#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=dsh-plugin-v${VERSION}" >> "$GITHUB_OUTPUT"
-
-  guard:
-    needs: resolve
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Verify tag matches package.json name and version
-        shell: bash
-        run: |
-          set -euo pipefail
-          PKG_NAME="$(node -p "require('./${{ env.PACKAGE_DIR }}/package.json').name")"
-          PKG_VERSION="$(node -p "require('./${{ env.PACKAGE_DIR }}/package.json').version")"
-          RELEASE_VERSION="${{ needs.resolve.outputs.version }}"
-          if [ "$PKG_NAME" != "$PACKAGE_NAME" ]; then
-            echo "package.json name (${PKG_NAME}) does not match expected ${PACKAGE_NAME}"
-            exit 1
-          fi
-          if [ "$PKG_VERSION" != "$RELEASE_VERSION" ]; then
-            echo "${PACKAGE_DIR}/package.json version (${PKG_VERSION}) does not match release version (${RELEASE_VERSION})"
-            exit 1
-          fi
-          echo "Version guard passed: ${PKG_NAME}@${RELEASE_VERSION}"
-
   publish:
-    needs: [resolve, guard]
+    if: github.repository == 'caiqy/BrowserSkill'
     runs-on: ubuntu-latest
-    # Secret NPM_TOKEN is stored on the "npm-publish" GitHub Environment.
+    timeout-minutes: 25
     environment: npm-publish
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v6
-
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
-          scope: "@wxg-prc-cpg"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck plugin
-        run: pnpm --filter "${{ env.PACKAGE_NAME }}" typecheck
-
-      - name: Test plugin
-        run: pnpm --filter "${{ env.PACKAGE_NAME }}" test
-
-      - name: Verify packaged skill resources
-        run: pnpm --filter "${{ env.PACKAGE_NAME }}" build && node scripts/check-dsh-package.mjs
-
-      - name: Publish to npm
-        working-directory: ${{ env.PACKAGE_DIR }}
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.0
+      - run: npm install --global npm@11
+      - name: Guard package identity and version
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::Environment secret NPM_TOKEN is not configured"
-            exit 1
-          fi
-          pnpm publish --access public --no-git-checks
-          echo "Published ${PACKAGE_NAME}@${{ needs.resolve.outputs.version }}"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync(`${process.env.PACKAGE_DIR}/package.json`, 'utf8'));
+          const expected = process.env.GITHUB_EVENT_NAME === 'push'
+            ? process.env.GITHUB_REF_NAME.replace(/^caiqy-dsh-plugin-v/, '') : process.env.EXPECTED_VERSION;
+          assert.equal(pkg.name, process.env.PACKAGE_NAME);
+          assert.equal(pkg.version, expected, 'Commit the requested version before releasing');
+          assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
+          assert.equal(pkg.repository.url, 'git+https://github.com/caiqy/BrowserSkill.git');
+          appendFileSync(process.env.GITHUB_ENV, `RELEASE_VERSION=${pkg.version}\n`);
+          NODE
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter '@caiqy/browser-skill-dsh-plugin' typecheck
+      - run: pnpm --filter '@caiqy/browser-skill-dsh-plugin' build
+      - run: pnpm --filter '@caiqy/browser-skill-dsh-plugin' test
+      - run: node scripts/check-dsh-package.mjs
+      - name: Pack the verified build
+        working-directory: packages/dsh-plugin-browserskill
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin-release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/plugin-release" --json > "$RUNNER_TEMP/release-pack.json"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const [pkg] = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/release-pack.json`, 'utf8'));
+          assert.equal(pkg.name, process.env.PACKAGE_NAME);
+          assert.equal(pkg.version, process.env.RELEASE_VERSION);
+          appendFileSync(process.env.GITHUB_ENV, `RELEASE_TARBALL=${process.env.RUNNER_TEMP}/plugin-release/${pkg.filename}\n`);
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-skill-${{ env.RELEASE_VERSION }}
+          path: ${{ runner.temp }}/plugin-release/*.tgz
+          if-no-files-found: error
+      - name: Publish with npm trusted publishing
+        if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+        run: npm publish "$RELEASE_TARBALL" --access public --tag dsh --provenance --registry https://registry.npmjs.org/
+      - name: Verify public release bytes
+        if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { setTimeout } from 'node:timers/promises';
+          const [local] = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/release-pack.json`, 'utf8'));
+          for (let attempt = 0; attempt < 40; attempt++) {
+            const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(local.name)}`, {
+              redirect: 'error', headers: { 'cache-control': 'no-cache' }, signal: AbortSignal.timeout(15000),
+            });
+            assert(response.ok || response.status === 404, `npm metadata HTTP ${response.status}`);
+            const metadata = response.ok ? await response.json() : {};
+            const published = metadata.versions?.[local.version];
+            if (published) {
+              assert.equal(published.dist.integrity, local.integrity);
+              assert.equal(metadata['dist-tags'].dsh, local.version);
+              const url = new URL(published.dist.tarball);
+              assert.equal(url.origin, 'https://registry.npmjs.org');
+              const archive = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(60000) });
+              if (archive.ok) {
+                assert.equal('sha512-' + createHash('sha512').update(Buffer.from(await archive.arrayBuffer())).digest('base64'), local.integrity);
+                console.log(`Verified public release ${local.name}@${local.version}`);
+                process.exit(0);
+              }
+            }
+            await setTimeout(15000);
+          }
+          throw new Error('Published version or archive is not publicly available after ten minutes');
+          NODE
