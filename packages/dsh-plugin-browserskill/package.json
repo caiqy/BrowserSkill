@@ -1,7 +1,7 @@
 {
   "name": "@caiqy/browser-skill-dsh-plugin",
   "description": "DeepSeek Harness tool plugin that exposes BrowserSkill browser automation (bsk_* tools) to the model",
-  "version": "0.3.3-dsh.2",
+  "version": "0.3.3-dsh.3",
   "license": "MIT",
   "publishConfig": {
     "access": "public",

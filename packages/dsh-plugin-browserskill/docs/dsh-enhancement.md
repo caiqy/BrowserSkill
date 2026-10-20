@@ -7,7 +7,7 @@
 | 官方 tag / commit | `dsh-plugin-v0.3.3` / `d9a78aed47874459ae1e44523a597e42dd9acf99` |
 | 实现仓库 / 分支 | `packages/browser-skill` / `dsh/plugin-parity-0.3.3` |
 | 发行包名及插件注册 ID | `@caiqy/browser-skill-dsh-plugin`；patch entry 仍为 `browserskill`，客户端 loader ID 与发行包名一致 |
-| 当前发行版本 | `0.3.3-dsh.2`，npm dist-tag 为 `dsh`；此前本地 `0.3.3-dsh.1` 保留原 tag 和交付记录 |
+| 当前发行版本 | `0.3.3-dsh.3`，npm dist-tag 为 `dsh`；此前本地 `0.3.3-dsh.1` 保留原 tag 和交付记录 |
 | 组件 | 官方 0.3.3 能力配套的 CLI、daemon 和浏览器扩展；运行时版本必须另行核实 |
 | 非目标 | 不做用户操作轨迹录制（旧交接功能 A5）；保留已有 video；不增 PDF、原生拖拽、任意 CDP、远程浏览器文件传输或自定义扩展/二进制 |
 
@@ -49,12 +49,12 @@ corepack pnpm --filter @caiqy/browser-skill-dsh-plugin test
 corepack pnpm --filter @caiqy/browser-skill-dsh-plugin build
 node scripts/check-dsh-package.mjs
 npm pack ./packages/dsh-plugin-browserskill --ignore-scripts --pack-destination .
-corepack pnpm dlx publint@0.3.25 run ./caiqy-browser-skill-dsh-plugin-0.3.3-dsh.2.tgz
+corepack pnpm dlx publint@0.3.25 run ./caiqy-browser-skill-dsh-plugin-0.3.3-dsh.3.tgz
 ```
 
 官方基线虽有 `lint:publint` 脚本，却未声明或安装 publint；上方用固定版本的临时 dlx 工具执行相同检查，不改项目依赖或锁文件。官方客户端 CSS 构建的 classMap 键顺序不固定，重复构建可能仅此处字节不同；交付一致性检查只对这些纯字符串 CSS 映射排序后比较，其他客户端代码及 runtime、类型、skill 和包元数据保持逐字节检查。
 
-先完成 build，再用上方 `npm pack --ignore-scripts` 从当前生成物打包到 workspace 根，随后 publint 直接检查该 tgz；避免 dlx 的 cwd/包管理器推断选中 monorepo 根包。常规 pack 的 prepack 会重复构建，当前流程已显式完成构建，因此关闭脚本。当前发行包为 `caiqy-browser-skill-dsh-plugin-0.3.3-dsh.2.tgz`；按实际命令输出确认位置。包保留 lib、skill、patch、LICENSE 和客户端资源。check-dsh-package 在无关 cwd 检查实际归档及技能资源解析，使用 fake runner，不替代浏览器实测。技能入口含 frontmatter 的 UTF-8 总大小仍限 4500 字节，各 references 必须从入口直接路由；构建器生成内容，不手改生成文件。
+先完成 build，再用上方 `npm pack --ignore-scripts` 从当前生成物打包到 workspace 根，随后 publint 直接检查该 tgz；避免 dlx 的 cwd/包管理器推断选中 monorepo 根包。常规 pack 的 prepack 会重复构建，当前流程已显式完成构建，因此关闭脚本。当前发行包为 `caiqy-browser-skill-dsh-plugin-0.3.3-dsh.3.tgz`；按实际命令输出确认位置。包保留 lib、skill、patch、LICENSE 和客户端资源。check-dsh-package 在无关 cwd 检查实际归档及技能资源解析，使用 fake runner，不替代浏览器实测。技能入口含 frontmatter 的 UTF-8 总大小仍限 4500 字节，各 references 必须从入口直接路由；构建器生成内容，不手改生成文件。
 
 开发中仅核对技能时可使用：
 

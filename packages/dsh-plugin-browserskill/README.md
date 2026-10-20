@@ -7,7 +7,7 @@ Use [BrowserSkill](https://github.com/Tencent/BrowserSkill) in
 websites, fill forms, and capture screenshots through native `bsk_*` tools.
 Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
-This fork publishes `0.3.3-dsh.2` as `@caiqy/browser-skill-dsh-plugin`, carrying
+This fork publishes `0.3.3-dsh.3` as `@caiqy/browser-skill-dsh-plugin`, carrying
 the local enhancements over official `0.3.3`. The official package remains
 `@wxg-prc-cpg/browser-skill-dsh-plugin`. Install only one of the two packages in a
 profile: they register the same `bsk_*` tools and observation routes.
@@ -27,7 +27,7 @@ Before installing the plugin:
 Install the plugin into the `web` profile, then start it:
 
 ```sh
-dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.2
+dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.3
 dsh --profile web
 ```
 
@@ -54,7 +54,7 @@ baseline and admits 0.2.x without opting into future 0.3.x hosts.
 Installed plugins do not update automatically. Install this exact fork release:
 
 ```sh
-dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.2
+dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.3
 ```
 
 To follow the fork's current release, install `@caiqy/browser-skill-dsh-plugin@dsh`.
