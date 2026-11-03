@@ -651,8 +651,9 @@ try {
           assert.equal(typeof (privateSync.observation_id ?? privateSync.observation?.observation_id), "string");
           const regularTabIds = new Set(tabs.tabs.map((tab) => tab.tabId));
           assert(privateTabs.tabs.every((tab) => !regularTabIds.has(tab.tabId)), "incognito agent tabs must be separate from the regular session");
-          await reject("bsk_tabs", { action: "borrow", session: privateSession, tabId: targetTabId }, /incognito|borrow/i);
-          run.results.incognito = { passed: true, value: { session: privateSession, tabs: privateTabsSummary, borrowedUserTab: false } };
+          const borrowError = await assertToolRejection("bsk_tabs", { action: "borrow", session: privateSession, tabId: targetTabId }, /Incognito sessions cannot borrow tabs/i);
+          assert.equal(borrowError.data?.reason, "incognito_borrow_disabled");
+          run.results.incognito = { passed: true, value: { session: privateSession, tabs: privateTabsSummary, borrowedUserTab: false, borrowRejectionReason: borrowError.data.reason } };
         } catch (error) {
           const message = String(error);
           const permissionBlocked = error.code === "permission_denied" && /incognito|allow in incognito|extension permission/i.test(message);
