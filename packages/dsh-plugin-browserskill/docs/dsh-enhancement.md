@@ -5,7 +5,7 @@
 | 项目 | 固定来源或边界 |
 | --- | --- |
 | 官方 tag / commit | `dsh-plugin-v0.4.1` / `b8f2d4f0fa35c8c7c866229e1cf3b3329ae39de5` |
-| 长期增强分支 | `dsh/plugin-parity-0.3.3`；名称中的旧版本表示初始基线 |
+| 长期增强分支 | `dsh/enhanced`；长期维护，不绑定上游版本号 |
 | 发行包及客户端 loader | `@caiqy/browser-skill-dsh-plugin`；Cordis patch entry 保持 `browserskill` |
 | 本次候选 | `0.4.1-dsh.1`；候选不表示已发布，公开版本以 npm 和市场索引为准 |
 | 配套组件 | 官方 CLI、运行中的 daemon、Chrome/Edge 扩展均为 0.4.1，协议 1.8 |

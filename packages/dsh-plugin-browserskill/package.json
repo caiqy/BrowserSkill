@@ -12,7 +12,7 @@
     "url": "git+https://github.com/caiqy/BrowserSkill.git",
     "directory": "packages/dsh-plugin-browserskill"
   },
-  "homepage": "https://github.com/caiqy/BrowserSkill/tree/dsh/plugin-parity-0.3.3/packages/dsh-plugin-browserskill#readme",
+  "homepage": "https://github.com/caiqy/BrowserSkill/tree/dsh/enhanced/packages/dsh-plugin-browserskill#readme",
   "bugs": {
     "url": "https://github.com/caiqy/BrowserSkill/issues"
   },
