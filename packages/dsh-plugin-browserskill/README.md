@@ -8,9 +8,9 @@ websites, fill forms, and capture screenshots through native `bsk_*` tools.
 Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
 This branch prepares the unreleased `@caiqy/browser-skill-dsh-plugin@0.4.1-dsh.1`
-candidate over official `0.4.1`. It pairs with official CLI/daemon `0.4.1`,
-protocol `1.8`, and a separately identified background compatibility extension
-(application `0.4.1-dsh.1`, numeric manifest `0.4.1.1`). A candidate build alone
+candidate over official `0.4.1`. It uses the unmodified official CLI, daemon
+and browser extension `0.4.1`, with protocol `1.8`; enhancements are confined
+to the DSH plugin. A candidate build alone
 does not establish browser validation or publication. The official plugin remains
 `@wxg-prc-cpg/browser-skill-dsh-plugin`; install only one plugin in a profile,
 as both register the same `bsk_*` tools and observation routes.
@@ -55,7 +55,7 @@ baseline and admits 0.2.x without opting into future 0.3.x hosts.
 ## Updating
 
 Installed plugins do not update automatically. For this unreleased candidate,
-use the verified local archive after preparing its matching extension:
+use the verified local archive with the matching official components:
 
 ```sh
 dsh plugin --profile web add <absolute-path-to-verified-candidate.tgz>
@@ -69,14 +69,14 @@ Updating the plugin does not update the CLI, daemon or browser extension.
 
 ### Upgrading to the 0.4.1 candidate
 
-Use official CLI/daemon `0.4.1` and the specifically identified compatibility
-extension (application `0.4.1-dsh.1`, numeric manifest `0.4.1.1`). Record the
-actual build/source/ZIP hash with the plugin archive hash before loading it.
-The default target policy requires protocol `1.8`; successful connection alone
-does not establish the required capabilities or prove background validation.
-Restoring official extension `0.4.1` restores its baseline behavior and known
-limitations, without changing CLI/daemon. Older public `0.3.3-dsh.3` instead
-requires its complete matching `0.3.3` component set.
+Use unmodified official CLI, daemon and browser extension `0.4.1`, protocol
+`1.8`. Record actual component metadata and the plugin archive's source/hash.
+Successful connection alone does not prove feature validation. Official 0.4.1
+can reject background fullPage or revoke an Edge upload during execution;
+this plugin does not claim to fix either limitation. Preserve the original
+error, inspect unknown effects once when allowed, then stop without replay.
+See the delivery notes for actual results and limits. Older public
+`0.3.3-dsh.3` requires its complete matching `0.3.3` component set.
 
 Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
 The six `bsk_*` tool names remain unchanged. After initial navigation, call

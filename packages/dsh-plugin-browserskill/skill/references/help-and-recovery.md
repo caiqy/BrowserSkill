@@ -30,19 +30,20 @@ backends to bypass limits. Borrow confirmation still applies.
 
 ## Components
 
-This branch prepares the unreleased plugin `0.4.1-dsh.1` with official CLI/daemon
-`0.4.1`, protocol `1.8`, and a separately identified background compatibility
-extension: application `0.4.1-dsh.1`, numeric manifest `0.4.1.1`. Check actual
-instance metadata and the recorded candidate build/source/hash; connection or a
-matching filename alone is insufficient. Candidate builds are not installation
-or verification evidence. Follow existing authorization for loading components;
-never replace an active extension or Desktop automatically.
+This unreleased plugin `0.4.1-dsh.1` uses unmodified official CLI, daemon and
+browser extension `0.4.1`, protocol `1.8`. Enhancements are confined to the DSH
+plugin. Check actual instance metadata and the candidate plugin's recorded hash;
+connection or a matching filename alone is insufficient. Candidate builds are
+not installation or verification evidence. Never replace an active component
+or Desktop automatically.
 
-Background execution remains scoped to a valid request. Human takeover and
-navigation still revoke control. On unknown effects, synchronize only when
-allowed, read back the actual result, then stop; do not repeat the action.
-Restoring official extension `0.4.1` restores its baseline behavior and known
-limitations without changing CLI/daemon. The old public plugin `0.3.3-dsh.3`
+Official 0.4.1 may reject background fullPage with `page_hidden` or interruption;
+Edge upload can lose its control context and return `effect_state: unknown`.
+Report these limits explicitly; they are not successful screenshot or upload
+results. Do not promise a background fix, force focus, record video, or bypass
+control to hide them. Human takeover and navigation still revoke control.
+On unknown effects, synchronize only when allowed, read back the actual result
+once, then stop; do not repeat the action. The old public plugin `0.3.3-dsh.3`
 requires the complete matching `0.3.3` component set.
 
 ## Recover
