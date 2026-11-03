@@ -67,14 +67,29 @@ const exec = (signal = new AbortController().signal) => ({
 const isPrivateReportField = (key) =>
   ["url", "title", "expression", "html", "text", "contents"].includes(key.toLowerCase()) ||
   /(?:tab|window|request|frame|document|attachment).*id$/i.test(key);
-const sanitizeReportValue = (value, key = "") => {
-  if (isPrivateReportField(key)) return undefined;
+const sanitizeReportValue = (value, key = "", featureResult = false) => {
+  if (isPrivateReportField(key) && !featureResult) return undefined;
   if (key === "files" && Array.isArray(value)) return value.map((file) => basename(String(file)));
   if (typeof value === "string") return value.replace(/https?:\/\/127\.0\.0\.1:\d+(?:\/[^\s"')}]*)?/g, "<fixture-url>");
   if (Array.isArray(value)) return value.map((item) => sanitizeReportValue(item));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([field]) => !isPrivateReportField(field)).map(([field, item]) => [field, sanitizeReportValue(item, field)]));
+  if (value && typeof value === "object") {
+    const featureMap = key === "results";
+    return Object.fromEntries(Object.entries(value).filter(([field]) => !isPrivateReportField(field) || featureMap && knownFeatures.includes(field)).map(([field, item]) => [field, sanitizeReportValue(item, field, featureMap && knownFeatures.includes(field))]));
+  }
   return value;
 };
+const sanitizedHtmlExample = sanitizeReportValue({
+  requestedFeatures: ["html"],
+  html: "private top-level body",
+  browsers: [{ results: { html: { passed: true, value: { html: "private body", text: "private text", writtenBytes: 42, truncated: true } } } }],
+});
+assert.equal(sanitizedHtmlExample.browsers[0].results.html.passed, true);
+assert.equal(sanitizedHtmlExample.browsers[0].results.html.value.writtenBytes, 42);
+assert.equal(sanitizedHtmlExample.browsers[0].results.html.value.truncated, true);
+assert.equal("html" in sanitizedHtmlExample.browsers[0].results.html.value, false);
+assert.equal("text" in sanitizedHtmlExample.browsers[0].results.html.value, false);
+assert.equal("html" in sanitizedHtmlExample, false);
+assert(sanitizedHtmlExample.requestedFeatures.every((feature) => sanitizedHtmlExample.browsers.every((browser) => browser.results[feature]?.passed === true || browser.results[feature]?.limitation === true)), "sanitization must preserve requested feature completeness");
 const errorRecord = (error) => ({
   message: sanitizeReportValue(String(error)),
   code: error?.code,
