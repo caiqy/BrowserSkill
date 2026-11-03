@@ -6,12 +6,7 @@
 // exactly the same sandbox + visibility rules as the M6 observation
 // handlers (review parity).
 
-import type {
-  CdpDebuggee,
-  CdpDispatchGuard,
-  DialogCursor,
-  RequestBackgroundExecution,
-} from "@/browser-driver/chromium-cdp";
+import type { CdpDebuggee, CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import {
   isAgentControlledTab,
@@ -92,13 +87,6 @@ export interface CdpRunner {
   getFrameGraph?(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph>;
   getAttachmentId?(tabId: number): string | undefined;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
-  requestBackgroundExecution?(
-    sessionId: string,
-    tabId: number,
-    requestId: string,
-    guard: CdpDispatchGuard,
-    prepare: () => Promise<void>,
-  ): RequestBackgroundExecution;
   acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   /** Whether this session requests the persistent override, regardless of applied CDP state. */
   ownsBackgroundExecution?(sessionId: string, tabId: number): boolean;

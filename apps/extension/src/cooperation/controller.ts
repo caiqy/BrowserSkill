@@ -46,8 +46,6 @@ type Activity = FrameState["events"][number] & {
 };
 interface TabState {
   lease: string;
-  backgroundCancel?: () => void;
-  lastInvalidation?: { event: string; at: number; epoch: number };
   /** Only the untouched, agent-created blank tab may bootstrap without an observation. */
   bootstrap: boolean;
   /** Only actual human participation changes the original tab/idle cleanup policy. */
@@ -431,11 +429,6 @@ export class CooperationController implements ControlAuthority {
       state.interruption?.abort(new Error("User activity revoked this action"));
       state.authorityRevision++;
       state.epoch++;
-      state.lastInvalidation = {
-        event: "collector.trusted_input",
-        at: Date.now(),
-        epoch: state.epoch,
-      };
       state.context = undefined;
     }
     // New or late documents can revoke control, but only collection establishes
@@ -465,12 +458,10 @@ export class CooperationController implements ControlAuthority {
         state.historyGap = true;
     }
   }
-  invalidate(tabId: number, event = "unspecified") {
+  invalidate(tabId: number) {
     const state = this.tabs.get(tabId);
     if (!state) return;
     state.epoch++;
-    state.lastInvalidation = { event, at: Date.now(), epoch: state.epoch };
-    state.backgroundCancel?.();
     state.context = undefined;
     state.unavailable = true;
     this.changed(state);
@@ -553,13 +544,6 @@ export class CooperationController implements ControlAuthority {
     }
     if (state.frames.size && !sameFrames(state.frames, frames, "human")) {
       state.epoch++;
-      state.lastInvalidation = {
-        event:
-          documents(state.frames) === documents(frames) ? "collector.human" : "collector.documents",
-        at: Date.now(),
-        epoch: state.epoch,
-      };
-      state.backgroundCancel?.();
       state.context = undefined;
     }
     for (const [id, frame] of frames) this.remember(state, id, frame);
@@ -1160,17 +1144,6 @@ export class CooperationController implements ControlAuthority {
       !visual &&
       !!(primaryTarget?.ref || primaryTarget?.selector) &&
       (req.method !== "tool.drag" || !!(params.target?.ref || params.target?.selector));
-    let background: ReturnType<NonNullable<CdpRunner["requestBackgroundExecution"]>> | undefined;
-    let cleanupError: string | undefined;
-    let lastMethod: string | undefined;
-    let handlerOutcome: unknown;
-    const frameIds = () =>
-      [...state.frames].map(([frameId, frame]) => ({
-        frameId,
-        document: frame.document,
-        human: frame.human,
-      }));
-    const initialFrames = frameIds();
     let sent = false;
     let finished = false;
     let revoked: string | undefined;
@@ -1448,336 +1421,254 @@ export class CooperationController implements ControlAuthority {
             },
           }
         : error;
-    const execute = async () => {
-      try {
-        await this.refresh(state);
-        assert();
-        if (
-          !context ||
-          !state.context ||
-          params.context_id !== state.context.id ||
-          context.epoch !== state.epoch ||
-          (!targetPolicy && context.refs !== session.refStore.revision)
-        )
-          return targetPolicy
-            ? reportFailure("This action requires a valid control context from cooperate sync")
-            : failure("This action requires the context returned by the latest cooperate sync");
-        if (
-          targetPolicy &&
-          !targeted &&
-          (params.observation_id !== context.observationId || context.consumed)
-        )
-          return actionError(
-            "observation_required",
-            "This action requires an unused strict observation from cooperate sync",
-            "observation",
-            "Synchronize, inspect the result and pass its observation_id explicitly with --observation (plugin: observationId).",
-          );
-        if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
-          const resolved = await resolveActionTarget(
-            guardedRunner(cdp),
-            session,
-            target,
-            primaryTarget,
-            "shared action",
-            targetPolicy || req.method === "tool.drag",
-          );
-          if (isRpcError(resolved)) return targetError(resolved);
-          actionTarget = resolved;
-          if (targeted && primaryTarget.selector) {
-            const pinned = { ...primaryTarget, ref: pin(resolved), selector: undefined };
-            req.params =
-              req.method === "tool.drag"
-                ? { ...(req.params as object), source: pinned }
-                : { ...(req.params as object), ...pinned };
-          }
+    try {
+      await this.refresh(state);
+      assert();
+      if (
+        !context ||
+        !state.context ||
+        params.context_id !== state.context.id ||
+        context.epoch !== state.epoch ||
+        (!targetPolicy && context.refs !== session.refStore.revision)
+      )
+        return targetPolicy
+          ? reportFailure("This action requires a valid control context from cooperate sync")
+          : failure("This action requires the context returned by the latest cooperate sync");
+      if (
+        targetPolicy &&
+        !targeted &&
+        (params.observation_id !== context.observationId || context.consumed)
+      )
+        return actionError(
+          "observation_required",
+          "This action requires an unused strict observation from cooperate sync",
+          "observation",
+          "Synchronize, inspect the result and pass its observation_id explicitly with --observation (plugin: observationId).",
+        );
+      if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
+        const resolved = await resolveActionTarget(
+          guardedRunner(cdp),
+          session,
+          target,
+          primaryTarget,
+          "shared action",
+          targetPolicy || req.method === "tool.drag",
+        );
+        if (isRpcError(resolved)) return targetError(resolved);
+        actionTarget = resolved;
+        if (targeted && primaryTarget.selector) {
+          const pinned = { ...primaryTarget, ref: pin(resolved), selector: undefined };
+          req.params =
+            req.method === "tool.drag"
+              ? { ...(req.params as object), source: pinned }
+              : { ...(req.params as object), ...pinned };
         }
-        if (req.method === "tool.drag" && (params.target?.ref || params.target?.selector)) {
-          const resolved = await resolveActionTarget(
-            guardedRunner(cdp),
-            session,
-            target,
-            params.target,
-            "drag destination",
-            true,
-          );
-          if (isRpcError(resolved)) return targetError(resolved);
-          destinationTarget = resolved;
-          if (targeted && params.target?.selector)
-            req.params = {
-              ...(req.params as object),
-              target: { ...params.target, ref: pin(resolved), selector: undefined },
-            };
-        }
-        if (params.depends_on !== undefined) {
-          if (
-            !Array.isArray(params.depends_on) ||
-            params.depends_on.length > 16 ||
-            params.depends_on.some(
-              (value) => typeof value !== "string" || !value || value.length > 1024,
-            )
-          )
-            return {
-              code: "invalid_params",
-              message: "depends_on requires at most 16 observed refs/selectors",
-            };
-          if (params.depends_on.length) {
-            // Dependencies constrain the decision even when a key has no target.
-            // Keep them separate from the target so learned text never relaxes them.
-            evidenceTargets = [];
-            for (const dependency of params.depends_on) {
-              const resolved = await resolveActionTarget(
-                guardedRunner(cdp),
-                session,
-                target,
-                /^@?e\d+$/.test(dependency) ? { ref: dependency } : { selector: dependency },
-                "action dependency",
-              );
-              if (isRpcError(resolved)) return resolved;
-              evidenceTargets.push(resolved);
-            }
-          }
-        }
-        // Wait only before execution, and only for transient element readiness.
-        // Business facts, missing nodes and ambiguous selectors fail immediately.
-        const deadline = Date.now() + (params.timeout_ms ?? 30_000);
-        while (true) {
-          try {
-            await verifyDecision();
-            break;
-          } catch (error) {
-            if (
-              !targeted ||
-              !(error instanceof ActionCheckError) ||
-              !["target_hidden", "target_disabled", "target_readonly"].includes(
-                error.rpcError.data?.reason ?? "",
-              )
-            )
-              throw error;
-            if (Date.now() >= deadline) {
-              checkFailure = { ...error.rpcError, code: "timeout" };
-              throw new ActionCheckError(checkFailure);
-            }
-            await new Promise((resolve) =>
-              setTimeout(resolve, Math.min(50, deadline - Date.now())),
-            );
-            // Push events revoke control while waiting. The dispatch guard still
-            // refreshes every frame before any effect, including missed events.
-            checkFailure = undefined;
-            assert();
-          }
-        }
-        if (targeted && params.timeout_ms !== undefined)
+      }
+      if (req.method === "tool.drag" && (params.target?.ref || params.target?.selector)) {
+        const resolved = await resolveActionTarget(
+          guardedRunner(cdp),
+          session,
+          target,
+          params.target,
+          "drag destination",
+          true,
+        );
+        if (isRpcError(resolved)) return targetError(resolved);
+        destinationTarget = resolved;
+        if (targeted && params.target?.selector)
           req.params = {
             ...(req.params as object),
-            timeout_ms: Math.max(1, deadline - Date.now()),
+            target: { ...params.target, ref: pin(resolved), selector: undefined },
           };
-        if (!targetPolicy) state.context = undefined;
-        else if (!targeted) context.consumed = true;
-        this.changed(state);
-        background = cdp.requestBackgroundExecution?.(
-          session.sessionId,
-          target.tabId,
-          req.id,
-          { signal: operationSignal, onDispatch: assert },
-          async () => {
+      }
+      if (params.depends_on !== undefined) {
+        if (
+          !Array.isArray(params.depends_on) ||
+          params.depends_on.length > 16 ||
+          params.depends_on.some(
+            (value) => typeof value !== "string" || !value || value.length > 1024,
+          )
+        )
+          return {
+            code: "invalid_params",
+            message: "depends_on requires at most 16 observed refs/selectors",
+          };
+        if (params.depends_on.length) {
+          // Dependencies constrain the decision even when a key has no target.
+          // Keep them separate from the target so learned text never relaxes them.
+          evidenceTargets = [];
+          for (const dependency of params.depends_on) {
+            const resolved = await resolveActionTarget(
+              guardedRunner(cdp),
+              session,
+              target,
+              /^@?e\d+$/.test(dependency) ? { ref: dependency } : { selector: dependency },
+              "action dependency",
+            );
+            if (isRpcError(resolved)) return resolved;
+            evidenceTargets.push(resolved);
+          }
+        }
+      }
+      // Wait only before execution, and only for transient element readiness.
+      // Business facts, missing nodes and ambiguous selectors fail immediately.
+      const deadline = Date.now() + (params.timeout_ms ?? 30_000);
+      while (true) {
+        try {
+          await verifyDecision();
+          break;
+        } catch (error) {
+          if (
+            !targeted ||
+            !(error instanceof ActionCheckError) ||
+            !["target_hidden", "target_disabled", "target_readonly"].includes(
+              error.rpcError.data?.reason ?? "",
+            )
+          )
+            throw error;
+          if (Date.now() >= deadline) {
+            checkFailure = { ...error.rpcError, code: "timeout" };
+            throw new ActionCheckError(checkFailure);
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+          // Push events revoke control while waiting. The dispatch guard still
+          // refreshes every frame before any effect, including missed events.
+          checkFailure = undefined;
+          assert();
+        }
+      }
+      if (targeted && params.timeout_ms !== undefined)
+        req.params = { ...(req.params as object), timeout_ms: Math.max(1, deadline - Date.now()) };
+      if (!targetPolicy) state.context = undefined;
+      else if (!targeted) context.consumed = true;
+      this.changed(state);
+      let result = await invoke(
+        guardedRunner(cdp, {
+          scriptedEffect: req.method === "tool.evaluate",
+          prepare: async (input) => {
+            await this.refresh(state, input);
+            assert();
+            if (
+              input?.type === "pointerdown" &&
+              Number.isFinite(input.x) &&
+              Number.isFinite(input.y)
+            ) {
+              state.target = { x: input.x!, y: input.y!, expires: this.now() + 650 };
+              this.changed(state);
+            }
+            if (!nativeInputStarted)
+              await verifyDecision(
+                targeted && req.method === "tool.press" && input?.type === "keydown",
+              );
+          },
+          dispatch: (startsInput, method) => {
+            assert();
+            sent = true;
+            nativeInputStarted ||= startsInput || (targeted && primaryEffect(method));
+          },
+          verifyPointerTarget: async (node, point, offset) => {
+            try {
+              await pointerTargetValidator(cdp)(node, point, offset);
+            } catch (error) {
+              revoked = error instanceof Error ? error.message : String(error);
+              if (error instanceof ActionCheckError) checkFailure = error.rpcError;
+              throw error;
+            }
+          },
+          beginDomMutation: async () => {
             await this.refresh(state);
             assert();
             if (!nativeInputStarted) await verifyDecision();
+            nativeInputStarted = true;
           },
-        );
-        state.backgroundCancel = () => {
-          void background?.release().catch(() => {});
-        };
-        let result = await invoke(
-          guardedRunner(cdp, {
-            background,
-            onMethod: (method) => {
-              lastMethod = method;
-            },
-            scriptedEffect: req.method === "tool.evaluate",
-            prepare: async (input) => {
-              await this.refresh(state, input);
-              assert();
-              if (
-                input?.type === "pointerdown" &&
-                Number.isFinite(input.x) &&
-                Number.isFinite(input.y)
-              ) {
-                state.target = { x: input.x!, y: input.y!, expires: this.now() + 650 };
-                this.changed(state);
-              }
-              if (!nativeInputStarted)
-                await verifyDecision(
-                  targeted && req.method === "tool.press" && input?.type === "keydown",
-                );
-            },
-            dispatch: (startsInput, method) => {
-              assert();
-              sent = true;
-              nativeInputStarted ||= startsInput || (targeted && primaryEffect(method));
-            },
-            verifyPointerTarget: async (node, point, offset) => {
-              try {
-                await pointerTargetValidator(cdp)(node, point, offset);
-              } catch (error) {
-                revoked = error instanceof Error ? error.message : String(error);
-                if (error instanceof ActionCheckError) checkFailure = error.rpcError;
-                throw error;
-              }
-            },
-            beginDomMutation: async () => {
-              await this.refresh(state);
-              assert();
-              if (!nativeInputStarted) await verifyDecision();
-              nativeInputStarted = true;
-            },
-          }),
-          operationSignal,
-          completionSignal,
-        );
-        handlerOutcome = isRpcError(result)
-          ? {
-              code: result.code,
-              phase: result.data?.phase,
-              effect_state: result.data?.effect_state,
-            }
-          : { ok: (result as { ok?: boolean } | undefined)?.ok, receipt: true };
-        // Pinning preserves the chosen node; the receipt also preserves how the
-        // caller selected it. This applies to download's early return as well.
-        if (
-          targeted &&
-          params.selector &&
-          result &&
-          typeof result === "object" &&
-          !isRpcError(result)
-        )
-          result = { ...result, used_selector: params.selector };
-        // A completed download transfers cleanup ownership to the daemon. Keep its
-        // receipt even if control changed during final cleanup; dropping it would
-        // orphan the file. The consumed context still requires a fresh next step.
-        if (["tool.tab_close", "tool.download"].includes(req.method) && !isRpcError(result))
-          return result;
-        // A handler receipt describes completed input, independently of whether its
-        // document can authorize the next action. evaluate reports script exceptions
-        // in-band; a successfully evaluated false value is still a completed script.
-        const completed =
-          sent &&
-          !isRpcError(result) &&
-          (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
-        if (["tool.evaluate", "tool.upload"].includes(req.method)) {
-          try {
-            await this.refresh(state);
-          } catch (error) {
-            if (!completed) throw error;
-            // A new frame may not yet expose its collector. Retain the completed
-            // receipt, but require a fresh sync before any further page action.
-            this.invalidate(state.tabId);
-          }
-        }
-        // Even a successful CDP reply does not authorize a stale next step.
-        if (state.stopped) return stopped(sent ? "unknown" : "none");
-        if (signal.aborted) {
-          if (targetPolicy && sent) state.context = undefined;
-          return {
-            code: "cancelled",
-            message: "Shared-tab action cancelled",
-            data: { effect_state: sent ? "unknown" : "none" },
-          };
-        }
-        const reason = revoked ?? interruption(completed);
-        if (checkFailure || reason)
-          return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
-        if (targetPolicy && isRpcError(result)) {
-          const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-          if (effect === "unknown") state.context = undefined;
-          return {
-            ...result,
-            data: {
-              ...result.data,
-              effect_state: effect,
-              phase: result.data?.phase ?? "execution",
-              recovery:
-                result.data?.recovery ??
-                (effect === "unknown"
-                  ? "Inspect the application result and synchronize before choosing another action. Never replay an uncertain submission."
-                  : "Inspect the reported target or parameter before choosing another action."),
-            },
-          };
-        }
+        }),
+        operationSignal,
+        completionSignal,
+      );
+      // Pinning preserves the chosen node; the receipt also preserves how the
+      // caller selected it. This applies to download's early return as well.
+      if (
+        targeted &&
+        params.selector &&
+        result &&
+        typeof result === "object" &&
+        !isRpcError(result)
+      )
+        result = { ...result, used_selector: params.selector };
+      // A completed download transfers cleanup ownership to the daemon. Keep its
+      // receipt even if control changed during final cleanup; dropping it would
+      // orphan the file. The consumed context still requires a fresh next step.
+      if (["tool.tab_close", "tool.download"].includes(req.method) && !isRpcError(result))
         return result;
-      } catch (error) {
-        handlerOutcome ??= { threw: true, name: error instanceof Error ? error.name : "unknown" };
-        if (state.stopped) return stopped(sent ? "unknown" : "none");
-        if (signal.aborted) {
-          if (targetPolicy && sent) state.context = undefined;
-          return {
-            code: "cancelled",
-            message: "Shared-tab action cancelled",
-            data: { effect_state: sent ? "unknown" : "none" },
-          };
-        }
-        if (error instanceof ActionCheckError) checkFailure = error.rpcError;
-        return reportFailure(
-          error instanceof Error ? error.message : String(error),
-          sent ? "unknown" : "none",
-        );
-      } finally {
-        finished = true;
+      // A handler receipt describes completed input, independently of whether its
+      // document can authorize the next action. evaluate reports script exceptions
+      // in-band; a successfully evaluated false value is still a completed script.
+      const completed =
+        sent &&
+        !isRpcError(result) &&
+        (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
+      if (["tool.evaluate", "tool.upload"].includes(req.method)) {
         try {
-          await background?.release();
+          await this.refresh(state);
         } catch (error) {
-          cleanupError = error instanceof Error ? error.message : String(error);
+          if (!completed) throw error;
+          // A new frame may not yet expose its collector. Retain the completed
+          // receipt, but require a fresh sync before any further page action.
+          this.invalidate(state.tabId);
         }
-        state.backgroundCancel = undefined;
-        if (state.interruption === intervention) state.interruption = undefined;
-        if (state.completion === completion) state.completion = undefined;
-        state.working = false;
-        this.changed(state);
       }
-    };
-    let result = await execute();
-    if (cleanupError) {
-      if (isRpcError(result))
-        result = {
+      // Even a successful CDP reply does not authorize a stale next step.
+      if (state.stopped) return stopped(sent ? "unknown" : "none");
+      if (signal.aborted) {
+        if (targetPolicy && sent) state.context = undefined;
+        return {
+          code: "cancelled",
+          message: "Shared-tab action cancelled",
+          data: { effect_state: sent ? "unknown" : "none" },
+        };
+      }
+      const reason = revoked ?? interruption(completed);
+      if (checkFailure || reason)
+        return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
+      if (targetPolicy && isRpcError(result)) {
+        const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
+        if (effect === "unknown") state.context = undefined;
+        return {
           ...result,
-          data: { ...result.data, cleanup: "pending", cleanup_error: cleanupError },
-        };
-      else if (req.method === "tool.download")
-        result = { ...(result as object), cleanup: "pending", cleanup_error: cleanupError };
-      else
-        result = {
-          code: "cdp_failed",
-          message: cleanupError,
-          data: { effect_state: sent ? "unknown" : "none", cleanup: "pending" },
-        };
-    }
-    if (req.method === "tool.upload" && isRpcError(result))
-      result = {
-        ...result,
-        data: {
-          ...result.data,
-          compat_diagnostic: {
-            request: req.id,
-            tab: target.tabId,
-            attachment: background?.attachmentId ?? cdp.getAttachmentId?.(target.tabId),
-            current_attachment: cdp.getAttachmentId?.(target.tabId),
-            initial_frames: initialFrames,
-            final_frames: frameIds(),
-            epoch: { before: epoch, after: state.epoch },
-            authority_revision: { before: authorityRevision, after: state.authorityRevision },
-            invalidation:
-              state.lastInvalidation && state.lastInvalidation.epoch > epoch
-                ? state.lastInvalidation
-                : undefined,
-            last_method: lastMethod,
-            handler: handlerOutcome,
-            final: { code: result.code, effect_state: result.data?.effect_state },
-            lease: background?.events,
-            cleanup: cleanupError ?? "complete",
+          data: {
+            ...result.data,
+            effect_state: effect,
+            phase: result.data?.phase ?? "execution",
+            recovery:
+              result.data?.recovery ??
+              (effect === "unknown"
+                ? "Inspect the application result and synchronize before choosing another action. Never replay an uncertain submission."
+                : "Inspect the reported target or parameter before choosing another action."),
           },
-        },
-      };
-    return result;
+        };
+      }
+      return result;
+    } catch (error) {
+      if (state.stopped) return stopped(sent ? "unknown" : "none");
+      if (signal.aborted) {
+        if (targetPolicy && sent) state.context = undefined;
+        return {
+          code: "cancelled",
+          message: "Shared-tab action cancelled",
+          data: { effect_state: sent ? "unknown" : "none" },
+        };
+      }
+      if (error instanceof ActionCheckError) checkFailure = error.rpcError;
+      return reportFailure(
+        error instanceof Error ? error.message : String(error),
+        sent ? "unknown" : "none",
+      );
+    } finally {
+      finished = true;
+      if (state.interruption === intervention) state.interruption = undefined;
+      if (state.completion === completion) state.completion = undefined;
+      state.working = false;
+      this.changed(state);
+    }
   }
 }

@@ -110,9 +110,7 @@ export function attachCooperation(
     }
     return false;
   });
-  chrome.webNavigation.onBeforeNavigate.addListener(({ tabId }) =>
-    controller.invalidate(tabId, "webNavigation.onBeforeNavigate"),
-  );
+  chrome.webNavigation.onBeforeNavigate.addListener(({ tabId }) => controller.invalidate(tabId));
   chrome.tabs.onRemoved.addListener((tabId) => controller.releaseTab(tabId));
   chrome.tabs.onDetached.addListener((tabId) => controller.detachTab(tabId));
   return controller;

@@ -137,9 +137,9 @@ export default defineBackground(() => {
   });
   attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
-    onDocumentChanged: (tabId, event) => {
+    onDocumentChanged: (tabId) => {
       sessions.invalidateTabRefs(tabId);
-      cooperation.invalidate(tabId, event);
+      cooperation.invalidate(tabId);
     },
     canControlDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);

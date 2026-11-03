@@ -1,12 +1,10 @@
-import type { CdpDispatchGuard, RequestBackgroundExecution } from "@/browser-driver/chromium-cdp";
+import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import { shareScreencasts } from "@/browser-driver/screencast-coordinator";
 import type { CdpRunner } from "@/tools/shared";
 import type { InputExpectation } from "./types";
 
 interface ActionGuard {
-  background?: RequestBackgroundExecution;
-  onMethod?: (method: string) => void;
   prepare?: (input?: InputExpectation) => Promise<void>;
   dispatch?: (startsInput: boolean, method: string) => void;
   verifyPointerTarget?: CdpRunner["verifyPointerTarget"];
@@ -84,7 +82,6 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
       throw new Error("Shared-tab observation cannot dispatch browser input");
     if (effect && !release) await prepare?.(input);
     const check = () => {
-      options.onMethod?.(method);
       if (effect && !release)
         dispatch?.(
           !!input || method === "Input.insertText" || method === "DOM.setFileInputFiles" || drag,
@@ -106,7 +103,6 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
     if (cdp.sendGuarded)
       return cdp.sendGuarded(target, method, params, {
         ...guard,
-        ...(options.background ? { attachmentId: options.background.attachmentId } : {}),
         ...(release ? { signal: undefined, attachmentId: leases.get(identity) } : {}),
         onDispatch: check,
       });
@@ -129,18 +125,12 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         };
       if (key === "beginDomMutation") return beginDomMutation;
       if (key === "verifyPointerTarget") return verifyPointerTarget;
-      if (key === "requestBackgroundExecution") return undefined;
-      if (key === "acquireBackgroundExecution") return options.background?.acquire;
-      if (key === "ownsBackgroundExecution") return options.background?.owns;
-      if (key === "restoreBackgroundExecution") return options.background?.restore;
-      if (key === "releaseBackgroundExecution")
-        return options.background
-          ? async (session: string, tab: number) => {
-              if (!options.background!.owns(session, tab))
-                throw new Error("Background permit is not owned by this request");
-              await options.background!.release();
-            }
-          : undefined;
+      if (
+        key === "acquireBackgroundExecution" ||
+        key === "ownsBackgroundExecution" ||
+        key === "restoreBackgroundExecution"
+      )
+        return undefined;
       if (key === "send")
         return (tabId: number, method: string, params?: object) => send({ tabId }, method, params);
       if (key === "sendToTarget" || key === "sendGuarded") return send;

@@ -46,15 +46,6 @@ import {
 export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
 
 /** Guards checked at native dispatch, after any asynchronous connection setup. */
-export interface RequestBackgroundExecution {
-  attachmentId: string | undefined;
-  events: { event: string; at: number }[];
-  acquire(sessionId: string, tabId: number): Promise<void>;
-  owns(sessionId: string, tabId: number): boolean;
-  restore(sessionId: string, tabId: number): Promise<void>;
-  release(): Promise<void>;
-}
-
 export interface CdpDispatchGuard {
   signal?: AbortSignal;
   /** Only use this live attachment; never reconnect a cleanup command. */
@@ -196,11 +187,8 @@ export class ChromiumCdp {
   private readonly detachInFlight = new Map<number, Promise<void>>();
   private readonly backgroundExecution = new BackgroundExecution(
     (tabId) => this.attachmentIds.get(tabId),
-    async (tabId, enabled, onDispatch) => {
-      onDispatch();
-      await this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled });
-      return true;
-    },
+    (tabId, enabled) =>
+      this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
   );
   private readonly tabOwners = new Map<number, Set<string>>();
   private readonly pendingDialogEntries = new Map<
@@ -242,7 +230,7 @@ export class ChromiumCdp {
       /** CDP observation alone does not authorize dismissing user dialogs. */
       canControlDialog?: (tabId: number) => boolean | Promise<boolean>;
       /** Invalidate tab refs when the root document or debugger attachment changes. */
-      onDocumentChanged?: (tabId: number, event?: string) => void;
+      onDocumentChanged?: (tabId: number) => void;
     } = {},
   ) {
     this.api = api;
@@ -307,156 +295,6 @@ export class ChromiumCdp {
     await this.backgroundExecution.reapply(tabId);
     if (!this.backgroundExecution.has(sessionId, tabId))
       throw new Error("Background execution was released during restore");
-  }
-
-  /** A request never acquires debugger/session ownership or reconnects its attachment. */
-  requestBackgroundExecution(
-    sessionId: string,
-    tabId: number,
-    requestId: string,
-    guard: CdpDispatchGuard,
-    prepare: () => Promise<void>,
-  ): RequestBackgroundExecution {
-    const attachmentId = this.getAttachmentId(tabId);
-    const owner = `request:${sessionId}:${requestId}:${crypto.randomUUID()}`;
-    const events: RequestBackgroundExecution["events"] = [];
-    const record = (event: string) => {
-      if (events.length < 24) events.push({ event, at: Date.now() });
-    };
-    const scopeAbort = new AbortController();
-    const scopeSignal = guard.signal
-      ? AbortSignal.any([guard.signal, scopeAbort.signal])
-      : scopeAbort.signal;
-    let released = false;
-    let acquiring: Promise<void> | undefined;
-    let cleanup: Promise<void> | undefined;
-    const check = () => {
-      guard.signal?.throwIfAborted();
-      if (released || !attachmentId || this.getAttachmentId(tabId) !== attachmentId)
-        throw new Error("Request background execution attachment/control ended");
-      guard.onDispatch?.();
-    };
-    const bound = (session: string, tab: number) => {
-      if (session !== sessionId || tab !== tabId)
-        throw new Error("Background permit belongs to another session or tab");
-      check();
-    };
-    const toggle = async (_tab: number, enabled: boolean, onDispatch: () => void) => {
-      // A retiring request cannot authorize a newly arrived persistent owner.
-      if (enabled && released) return false;
-      if (enabled) check();
-      // Cleanup is attachment-bound but deliberately independent of a revoked action signal.
-      if (!attachmentId || this.getAttachmentId(tabId) !== attachmentId) return false;
-      await this.sendGuarded(
-        { tabId },
-        "Emulation.setFocusEmulationEnabled",
-        { enabled },
-        {
-          attachmentId,
-          ...(enabled ? guard : {}),
-          onDispatch: () => {
-            if (enabled) check();
-            onDispatch();
-            record(enabled ? "enable-dispatch" : "disable-dispatch");
-          },
-        },
-      );
-      record(enabled ? "enable-ack" : "disable-ack");
-      return true;
-    };
-    const release = (): Promise<void> => {
-      if (cleanup) return cleanup;
-      released = true;
-      scopeAbort.abort(new Error("Request background execution ended"));
-      record("release");
-      guard.signal?.removeEventListener("abort", abort);
-      this.backgroundExecution.release(owner, tabId);
-      const work = this.backgroundExecution.synchronize(tabId, false, toggle);
-      // Observe late native replies even after the caller's cleanup budget expires.
-      void work.catch(() => {});
-      cleanup = (async () => {
-        try {
-          if (!(await cleanupWait(work))) {
-            record("cleanup-pending");
-            throw new Error(
-              "Request background cleanup timed out; late acknowledgement remains fenced",
-            );
-          }
-          record("cleanup-complete");
-        } catch (error) {
-          if (
-            attachmentId &&
-            this.getAttachmentId(tabId) === attachmentId &&
-            !this.backgroundExecution.hasOwners(tabId)
-          ) {
-            record("cleanup-detach");
-            await this.detach(tabId, attachmentId);
-          }
-          throw error;
-        }
-      })();
-      return cleanup;
-    };
-    const abort = () => {
-      void release().catch(() => {});
-    };
-    guard.signal?.addEventListener("abort", abort, { once: true });
-    const wait = async (work: Promise<void>) => {
-      void work.catch(() => {});
-      const signal = scopeSignal;
-      signal.throwIfAborted();
-      let aborted!: () => void;
-      try {
-        await Promise.race([
-          work,
-          new Promise<never>((_, reject) => {
-            aborted = () => reject(signal.reason);
-            signal.addEventListener("abort", aborted, { once: true });
-            if (signal.aborted) aborted();
-          }),
-        ]);
-      } finally {
-        signal.removeEventListener("abort", aborted);
-      }
-    };
-    return {
-      attachmentId,
-      events,
-      acquire: async (session, tab) => {
-        bound(session, tab);
-        if (!acquiring)
-          acquiring = (async () => {
-            await prepare();
-            check();
-            this.backgroundExecution.retain(owner, tabId, attachmentId);
-            record("retain");
-            await this.backgroundExecution.synchronize(tabId, false, toggle);
-            check();
-          })();
-        try {
-          await wait(acquiring);
-        } catch (error) {
-          void release().catch(() => {});
-          throw error;
-        }
-      },
-      owns: (session, tab) =>
-        !released &&
-        session === sessionId &&
-        tab === tabId &&
-        this.getAttachmentId(tabId) === attachmentId &&
-        this.backgroundExecution.has(owner, tabId),
-      restore: async (session, tab) => {
-        bound(session, tab);
-        if (!this.backgroundExecution.has(owner, tabId))
-          throw new Error("Request background execution is not owned");
-        await prepare();
-        check();
-        await wait(this.backgroundExecution.synchronize(tabId, true, toggle));
-        check();
-      },
-      release,
-    };
   }
 
   private async ensureRawAttached(tabId: number): Promise<void> {
@@ -809,7 +647,7 @@ export class ChromiumCdp {
     if (!this.attachedTabs.has(tabId)) return;
     this.attachedTabs.delete(tabId);
     this.attachmentIds.delete(tabId);
-    this.options.onDocumentChanged?.(tabId, "debugger.detach");
+    this.options.onDocumentChanged?.(tabId);
     this.backgroundExecution.invalidate(tabId);
     this.clearDialogState(tabId);
     this.clearConsoleState(tabId);
@@ -1047,7 +885,7 @@ export class ChromiumCdp {
             frame &&
             !frame.parentId))
       ) {
-        this.options.onDocumentChanged?.(tabId, method);
+        this.options.onDocumentChanged?.(tabId);
       }
       const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : undefined;
       if (!sessionId) return;
@@ -1492,7 +1330,7 @@ export class ChromiumCdp {
     if (this.detachSubscription) return;
     const listener = (source: chrome.debugger.Debuggee, _reason: string) => {
       if (typeof source.tabId === "number") {
-        this.options.onDocumentChanged?.(source.tabId, "debugger.onDetach");
+        this.options.onDocumentChanged?.(source.tabId);
         this.attachedTabs.delete(source.tabId);
         this.attachmentIds.delete(source.tabId);
         this.attachmentVersions.set(

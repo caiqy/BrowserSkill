@@ -1390,16 +1390,14 @@ describe("document-bound references", () => {
     expect(changed).not.toHaveBeenCalled();
     for (const method of ["Page.frameNavigated", "Page.documentOpened", "DOM.documentUpdated"]) {
       onEvent.fire({ tabId: 4 }, method, { frame: { id: "root" } });
-      expect(changed).toHaveBeenLastCalledWith(4, method);
+      expect(changed).toHaveBeenLastCalledWith(4);
     }
     expect(changed).toHaveBeenCalledTimes(3);
     await cdp.detach(4);
     expect(changed).toHaveBeenCalledTimes(4);
-    expect(changed).toHaveBeenLastCalledWith(4, "debugger.detach");
     await cdp.ensureAttached(4);
     onDetach.fire({ tabId: 4 }, "target_closed");
     expect(changed).toHaveBeenCalledTimes(5);
-    expect(changed).toHaveBeenLastCalledWith(4, "debugger.onDetach");
     cdp.dispose();
   });
 
