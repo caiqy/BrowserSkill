@@ -129,7 +129,7 @@ async function host() {
             startJournal: memoryStartJournal(),
             runnerFactory: () => ({
               async run(args) {
-                expect(args).toEqual(["--version", "--json"]);
+                expect(args).toEqual(["--version"]);
                 return {
                   code: 0,
                   stdout: '{"version":"0.3.2"}',

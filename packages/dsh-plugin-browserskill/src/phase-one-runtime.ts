@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
+import type { ParseBskJsonOptions } from "./runner";
 import type { ToolDeps } from "./tools";
 
 export type ToolRegistrar = (definition: ToolDefinition) => void;
@@ -13,6 +14,8 @@ export interface PhaseOneRuntime {
     label: string,
     observeSession?: string,
     runnerTimeoutMs?: number,
+    parseOptions?: ParseBskJsonOptions,
+    literal?: string,
   ): Promise<unknown>;
   commandLine(args: string[]): string;
   presentTerminalResult: (_args: never, result: ToolResult) => TerminalPresentation;
@@ -38,10 +41,6 @@ export function isSnapshotRef(target: string): boolean {
 export function runnerTimeout(deps: ToolDeps, commandTimeoutMs: number | undefined): number {
   if (commandTimeoutMs === undefined) return deps.config.defaultTimeoutMs;
   return Math.max(deps.config.defaultTimeoutMs, commandTimeoutMs + 15_000);
-}
-
-export function appendTarget(args: string[], target: string): void {
-  args.push(target);
 }
 
 export function appendTabId(args: string[], tabId: number | undefined): void {

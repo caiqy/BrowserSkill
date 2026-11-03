@@ -189,8 +189,9 @@ export default defineContentScript({
 
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      const controlOverlayVisible =
+      const controlVisible =
         videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
+      const controlOverlayVisible = controlVisible && !activeAgentState?.cooperation;
       // Leaving control (including help/record UI) must not retain click leases.
       if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
@@ -198,7 +199,10 @@ export default defineContentScript({
         overlayState.activeHelp !== null ||
         overlayState.activeRecord !== null;
       const showInteractive = videoOverlay.canRenderInteractive(interactiveOverlayVisible);
-      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
+      const cooperationState =
+        controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
+      const cardVisible = controlOverlayVisible || !!cooperationState;
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
         controlOverlayVisible && overlayState.automationBypassCount === 0,
@@ -223,7 +227,8 @@ export default defineContentScript({
                 request: showInteractive ? overlayState.activeRecord : null,
               }),
               React.createElement(ControlOverlay, {
-                visible: controlOverlayVisible,
+                visible: cardVisible,
+                state: cooperationState,
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
                 onInterrupt: handleInterrupt,

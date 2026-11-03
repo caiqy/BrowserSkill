@@ -28,12 +28,33 @@ text-only models may stay blocked. Report missing inputs/capabilities or exhaust
 alternatives; continue independent work. Never repeat unknown effects or switch
 backends to bypass limits. Borrow confirmation still applies.
 
+## Components
+
+This branch prepares the unreleased plugin `0.4.1-dsh.1` with official CLI/daemon
+`0.4.1`, protocol `1.8`, and a separately identified background compatibility
+extension: application `0.4.1-dsh.1`, numeric manifest `0.4.1.1`. Check actual
+instance metadata and the recorded candidate build/source/hash; connection or a
+matching filename alone is insufficient. Candidate builds are not installation
+or verification evidence. Follow existing authorization for loading components;
+never replace an active extension or Desktop automatically.
+
+Background execution remains scoped to a valid request. Human takeover and
+navigation still revoke control. On unknown effects, synchronize only when
+allowed, read back the actual result, then stop; do not repeat the action.
+Restoring official extension `0.4.1` restores its baseline behavior and known
+limitations without changing CLI/daemon. The old public plugin `0.3.3-dsh.3`
+requires the complete matching `0.3.3` component set.
+
 ## Recover
 
 - Unknown browser tool after plugin reload: invoke `skill` with `name: "browser-skill"`
   again (users can enter `/browser-skill`), then retry the intended browser tool once
   after its schema appears. If it remains unavailable, report the failure.
-- Stale ref: observe, then retry the intended action once.
+- Stale ref or target failure: inspect the live target and choose the appropriate action.
+  A missing, hidden or covered target is not evidence of human takeover.
+- `precondition_failed`: compare `target`, `field`, `expected` and `actual`, then reconsider
+  the decision. A new context does not make the expected value true.
+- Control revoked: wait-user while the person is active, then sync and reconcile completed steps.
 - Unknown tab/session: list owned resources or start a session with the required
   browser selector, if any; never guess IDs.
 - Failed/interrupted stop: accepted cleanup continues in the background. Retry the

@@ -7,12 +7,15 @@ Use [BrowserSkill](https://github.com/Tencent/BrowserSkill) in
 websites, fill forms, and capture screenshots through native `bsk_*` tools.
 Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
-This fork publishes `0.3.3-dsh.3` as `@caiqy/browser-skill-dsh-plugin`, carrying
-the local enhancements over official `0.3.3`. The official package remains
-`@wxg-prc-cpg/browser-skill-dsh-plugin`. Install only one of the two packages in a
-profile: they register the same `bsk_*` tools and observation routes.
-See [DSH enhancement delivery notes](https://github.com/caiqy/BrowserSkill/blob/dsh/plugin-parity-0.3.3/packages/dsh-plugin-browserskill/docs/dsh-enhancement.md)
-for the baseline, structured examples and actual verification boundaries.
+This branch prepares the unreleased `@caiqy/browser-skill-dsh-plugin@0.4.1-dsh.1`
+candidate over official `0.4.1`. It pairs with official CLI/daemon `0.4.1`,
+protocol `1.8`, and a separately identified background compatibility extension
+(application `0.4.1-dsh.1`, numeric manifest `0.4.1.1`). A candidate build alone
+does not establish browser validation or publication. The official plugin remains
+`@wxg-prc-cpg/browser-skill-dsh-plugin`; install only one plugin in a profile,
+as both register the same `bsk_*` tools and observation routes.
+See [DSH enhancement delivery notes](docs/dsh-enhancement.md)
+for candidate hashes, component requirements and verification boundaries.
 
 ## Installation
 
@@ -27,7 +30,7 @@ Before installing the plugin:
 Install the plugin into the `web` profile, then start it:
 
 ```sh
-dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.3
+dsh plugin --profile web add <absolute-path-to-verified-candidate.tgz>
 dsh --profile web
 ```
 
@@ -51,17 +54,64 @@ baseline and admits 0.2.x without opting into future 0.3.x hosts.
 
 ## Updating
 
-Installed plugins do not update automatically. Install this exact fork release:
+Installed plugins do not update automatically. For this unreleased candidate,
+use the verified local archive after preparing its matching extension:
 
 ```sh
-dsh plugin --profile web add @caiqy/browser-skill-dsh-plugin@0.3.3-dsh.3
+dsh plugin --profile web add <absolute-path-to-verified-candidate.tgz>
 ```
 
-To follow the fork's current release, install `@caiqy/browser-skill-dsh-plugin@dsh`.
-The fork publishes prereleases under the npm `dsh` dist-tag.
-See the [manual update/rollback procedure](https://github.com/caiqy/BrowserSkill/blob/dsh/plugin-parity-0.3.3/packages/dsh-plugin-browserskill/docs/dsh-enhancement.md#更新与回退).
-Restart that dsh profile after upgrading. This command updates the plugin; update
-the `bsk` CLI and browser extension separately when a release requires it.
+Published fork prereleases use `@caiqy/browser-skill-dsh-plugin@dsh`; that tag
+may still select an older release with different component requirements.
+See the [manual update/rollback procedure](docs/dsh-enhancement.md#安装升级与成套回退).
+Install and restart an active profile only with the applicable authorization.
+Updating the plugin does not update the CLI, daemon or browser extension.
+
+### Upgrading to the 0.4.1 candidate
+
+Use official CLI/daemon `0.4.1` and the specifically identified compatibility
+extension (application `0.4.1-dsh.1`, numeric manifest `0.4.1.1`). Record the
+actual build/source/ZIP hash with the plugin archive hash before loading it.
+The default target policy requires protocol `1.8`; successful connection alone
+does not establish the required capabilities or prove background validation.
+Restoring official extension `0.4.1` restores its baseline behavior and known
+limitations, without changing CLI/daemon. Older public `0.3.3-dsh.3` instead
+requires its complete matching `0.3.3` component set.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. After initial navigation, call
+`bsk_session action:sync` and pass its returned `context_id` as `contextId`.
+New sessions use target policy: DOM actions can reuse control across supplementary
+reads and completed actions, and `expect` checks protect observed business facts.
+Scripts, untargeted keys and visual actions also require the sync's `observation_id`
+as `observationId`. Human intervention or navigation revokes control; synchronize
+and replan. Select `policy: "strict"` on the first sync to retain the legacy
+one-action-per-context workflow. Later syncs and steps preserve the selected policy.
+Custom tool integrations must expose and forward these fields. See the
+[cooperation reference](skill/references/cooperation.md) for action-specific checks.
+
+### Upgrading to 0.4.0
+
+Update the CLI and restart the running daemon first, then update the browser
+extension, and finally update this plugin. The 0.4.0 extension requires daemon
+protocol 1.6 or later; CLI/daemon 0.3.3 uses 1.3 and cannot connect. Updating the npm
+package does not update the CLI, daemon or extension. Use matching 0.4.0 components
+for drag, step and saved-observation workflows.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. Shared control is now enabled for new
+tasks: after initial navigation, call `bsk_session action:sync`, pass its returned
+context identifier as `contextId` for one action, then synchronize again. Human
+edits and changed page evidence can revoke a pending action; synchronize and replan
+instead of repeating the old call. Version 0.4.1 changes the default policy as
+described above.
+Custom tool policies and integrations must allow the new actions they intend to use.
+
+Explicit `saveFull` results remain as JSON files on the CLI machine until deleted;
+closing a browser task or clearing extension storage does not remove them.
+See [cooperation](skill/references/cooperation.md) and
+[steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+If upgrading from before 0.3.3, also apply the tool-name migration below.
 
 ### Breaking tool API migration (0.3.3)
 
@@ -96,12 +146,12 @@ capabilities. Updating the npm package does not update either component.
 
 | Tool | Actions | Purpose |
 | --- | --- | --- |
-| `bsk_session` | `start`, `stop`, `list`, `browsers` | Manage plugin-owned sessions; query connected browser instances. |
-| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element`, `wait-ms` | Navigate; wait for lifecycle events, an element condition, or a fixed delay. |
-| `bsk_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
-| `bsk_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls, evaluate page scripts and transfer local files. |
+| `bsk_session` | `start`, `stop`, `list`, `browsers`, `share`, `sync`, `wait-user`, `cooperation-status` | Manage owned sessions and shared-tab control. |
+| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element`, `wait-ms` | Navigate the active tab; wait for page lifecycle events or one element condition. |
+| `bsk_inspect` | `observe`, `snapshot`, `view`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, read saved observations, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
+| `bsk_interact` | `click`, `hover`, `drag`, `step`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
 | `bsk_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
-| `bsk_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
+| `bsk_assist` | `resize`, `emulate`, `request-help`, `dialog-status`, `dialog-accept`, `dialog-dismiss`, `operation-await`, `operation-cancel` | Resize or emulate the browser and pause for human-only steps. |
 
 For `bsk_page` with `action: "wait-for-element"`, see the
 [element-wait reference](skill/references/interaction-details.md#element-waits) for
@@ -113,14 +163,36 @@ for signed deltas, optional targets, result semantics and interruption.
 For `bsk_interact` with `action: "scroll-to"`, see the
 [scroll-to reference](../../docs/scroll-to.md) for parameters, visible bounds and errors.
 
+For `bsk_interact` with `action: "drag"`, pass the source as `target` and either a
+destination `to` or relative `deltaX`/`deltaY`. The default holds the mouse button
+while moving; `dragMode: "click-move-click"` selects ranges using two clicks and
+requires a destination. Use current observed refs/selectors and inspect the result.
+
+Use `action: "step"` for one decided interaction, with `stepAction` and a `params`
+JSON string using that action's CLI protocol fields. It executes once, optionally
+waits for `untilVisible`, then synchronizes. Read action, readiness and sync outcomes
+separately; a failed follow-up does not mean the action should be repeated.
+
+Save complete observations with `saveFull` on `bsk_session action: "sync"` or
+`bsk_interact action: "step"`. Use `bsk_inspect action: "view"` with `file` and
+optional `find`, `startLine` or `lineCount` to inspect the saved file locally, even
+after the browser session ends. The view is historical, makes no browser calls,
+and needs no `session` or `contextId`. It never refreshes refs or authorizes an
+action. See [steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+
 For `bsk_inspect` with `action: "extract"`, see
 [structured extraction](../../docs/structured-extraction.md) for discovery, list
 fields, JSON/CSV output and loaded-DOM completeness.
 
-Page-script evaluation is available through `bsk_interact` with `action: "evaluate"`.
-The local enhancement also adds full-page screenshots, HTML file export, hover
-probes, extended emulation and named sessions; see the [structured examples](docs/dsh-enhancement.md#结构化工具示例).
-User interaction trace recording remains unsupported; existing task video is separate.
+Scripts and file transfers use `bsk_interact` actions `evaluate`, `upload` and `download`,
+with the same session ownership and observation context as other actions. Interaction recording
+is not exposed by this plugin.
+
+Human/agent collaboration is enabled automatically for new sessions and owned task tabs.
+No `share` call is required. See [cooperation](skill/references/cooperation.md).
+Actions on shared tabs require the `contextId` returned by `sync` or a step's
+`post.context_id`. Target-policy DOM actions can reuse it; strict-policy contexts
+remain single-use. The plugin never infers context or observation receipts from its cache.
 
 ### Activation failures
 
@@ -143,9 +215,9 @@ after fixing it.
 One agent conversation can drive several browser sessions at once:
 
 - `bsk_session` with `action: start` returns the session id and makes it the **current session**.
-- Every operation tool accepts an optional `session` argument. When omitted, the call acts on the
+- Browser operations accept an optional `session` argument. When omitted, the call acts on the
   current session (the one most recently started or used); when given, that session becomes current.
-- Every tool result echoes the session it actually acted on, so the model never has to guess.
+- Browser operation results echo the session they acted on; offline `view` reads only its local file.
 - The number of concurrent sessions started through the plugin is capped (`maxSessions`, default 5).
 - Unloading the plugin stops every session it started and kills in-flight bsk processes.
 
@@ -274,14 +346,43 @@ Run the package's typecheck, build and tests, then `node scripts/check-dsh-packa
 Pack the built package with `npm pack --ignore-scripts` and publish the inspected
 archive with `npm publish <archive.tgz> --access public --tag dsh --registry=https://registry.npmjs.org/`.
 
-Publish only `@caiqy/browser-skill-dsh-plugin`; the official
-`@wxg-prc-cpg/browser-skill-dsh-plugin` package is maintained upstream.
-Use the `caiqy-dsh-plugin-v<version>` tag for fork releases, which does not trigger
-the inherited upstream release workflow. Push the fork commit before updating the
-parent workspace's submodule pointer and market index.
+Before publishing the 0.4.1 plugin, publish the coordinated 0.4.1 CLI and extension.
+Make the CLI release downloadable first, then confirm extension availability in
+the supported installation channels. The default target policy requires protocol
+1.8 on both the running daemon and extension. During rollout, explicitly select
+strict policy on every sync/enable and step when using older compatible peers;
+do not assume a successful handshake enables target policy.
+Publishing the npm package alone does not upgrade either component on users' machines.
 
-Keep the official 0.3.3 CLI and extension installed separately. Publishing this
-plugin does not update those components. Published npm versions cannot be overwritten.
+1. Prepare a release PR that updates the shared CLI, extension and plugin version,
+   local Cargo lock entries, changelog and relevant documentation. Merge it after
+   validation and record the merge commit.
+2. Tag that commit as `cli-v<version>` and wait for the complete public CLI release,
+   including [Windows signing](../../docs/windows-signing.md) and
+   [macOS signing and notarization](../../docs/macos-signing.md). `Release CLI`
+   builds alone are not publication; both `Publish CLI` verification jobs and its
+   final publish job must succeed. Synchronize store permission/privacy disclosures,
+   then tag the same commit as `ext-v<version>` and wait for store availability.
+3. Create `dsh-plugin-v<version>` on that same merge commit and push only that tag:
+
+   ```sh
+   git tag -a dsh-plugin-v<version> <merge-commit> -m "Release DSH plugin <version>"
+   git -c push.followTags=false push origin refs/tags/dsh-plugin-v<version>
+   ```
+
+4. Approve the `npm-publish` environment deployment in GitHub Actions when required,
+   then verify the published npm version and `latest` dist-tag.
+
+The workflow checks the version, runs typechecks and tests, builds the package,
+and publishes it to npm.
+
+You can also run the workflow manually from GitHub Actions on the intended release
+ref. Both triggers require an unpublished version and the `NPM_TOKEN` secret in the
+`npm-publish` GitHub Environment.
+
+npm updates the package README only when a new version is published, including
+for documentation-only changes. Published versions cannot be overwritten. See
+[npm's README update rules](https://docs.npmjs.com/about-package-readme-files/).
 
 ## License
 

@@ -1,7 +1,6 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
   appendTabId,
-  appendTarget,
   type PhaseOneRuntime,
   requireNonEmpty,
   requirePositive,
@@ -20,150 +19,6 @@ export function registerPhaseOneInteractionTools(
   runtime: PhaseOneRuntime,
 ): void {
   const { registry } = deps;
-
-  register(
-    defineTool({
-      name: "interact.evaluate",
-      description:
-        "Evaluate a JavaScript expression in an owned tab. Page exceptions are errors; scripts may change the page.",
-      parameters: {
-        session: SESSION_PARAM,
-        tabId: TAB_ID_PARAM,
-        expression: {
-          type: "string",
-          required: true,
-          description: "JavaScript expression; use an IIFE for statements.",
-        },
-        awaitPromise: { type: "boolean", description: "Await a returned Promise (default true)." },
-        returnByValue: {
-          type: "boolean",
-          description: "Serialize the result by value (default true).",
-        },
-        timeoutMs: TIMEOUT_MS_PARAM,
-      },
-      output: {
-        schema: { type: "json" },
-        render: (_args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }],
-      },
-      async execute(args, exec) {
-        requireNonEmpty(args.expression, "expression");
-        requirePositive(args.timeoutMs, "timeoutMs");
-        const sessionId = registry.resolve(args.session, "bsk_interact(action=evaluate)");
-        const timeoutMs = args.timeoutMs ?? 30_000;
-        const cmdArgs = [
-          "evaluate",
-          "--session",
-          sessionId,
-          "--await-promise",
-          String(args.awaitPromise ?? true),
-          "--return-by-value",
-          String(args.returnByValue ?? true),
-          "--timeout",
-          `${timeoutMs}ms`,
-        ];
-        appendTabId(cmdArgs, args.tabId);
-        cmdArgs.push("--", args.expression);
-        const reply = (await runtime.run(
-          exec,
-          cmdArgs,
-          "evaluate",
-          sessionId,
-          runnerTimeout(deps, timeoutMs),
-        )) as { ok: boolean; error?: unknown };
-        if (reply.ok !== true) throw new Error(`evaluate failed: ${JSON.stringify(reply)}`);
-        return { ...reply, session: sessionId } as never;
-      },
-      presentCall: (args) => ({
-        card: "terminal",
-        title: runtime.commandLine(["evaluate", "--session", args.session ?? "(current)"]),
-        description: "Evaluate page JavaScript",
-      }),
-      presentResult: runtime.presentTerminalResult,
-    }),
-  );
-
-  for (const action of ["upload", "download"] as const) {
-    register(
-      defineTool({
-        name: `interact.${action}`,
-        description:
-          action === "upload"
-            ? "Upload local files through a file input/chooser or a drop target using the official transfer pipeline."
-            : "Click a download trigger and save the downloaded file on this host. Existing output requires overwrite=true.",
-        parameters: {
-          session: SESSION_PARAM,
-          tabId: TAB_ID_PARAM,
-          target: {
-            type: "string",
-            required: true,
-            description: "Fresh ref or CSS selector of the upload/download target.",
-          },
-          files: {
-            type: "array",
-            items: { type: "string" },
-            description: "Upload: nonempty list of local files on this host.",
-          },
-          mode: {
-            type: "string",
-            enum: ["input", "drop"],
-            description: "Upload mechanism (default input).",
-          },
-          output: { type: "string", description: "Download: destination file on this host." },
-          overwrite: {
-            type: "boolean",
-            description:
-              "Download: replace an existing destination only when explicitly authorized.",
-          },
-          timeoutMs: TIMEOUT_MS_PARAM,
-        },
-        output: {
-          schema: { type: "json" },
-          render: (_args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }],
-        },
-        async execute(args, exec) {
-          requireNonEmpty(args.target, "target");
-          requirePositive(args.timeoutMs, "timeoutMs");
-          const sessionId = registry.resolve(args.session, `bsk_interact(action=${action})`);
-          const timeoutMs = args.timeoutMs ?? 120_000;
-          const cmdArgs = [action, "--session", sessionId, "--timeout", `${timeoutMs}ms`];
-          appendTabId(cmdArgs, args.tabId);
-          if (action === "upload") {
-            if (!args.files?.length) throw new Error("files must contain at least one local file");
-            for (const file of args.files) {
-              requireNonEmpty(file, "file");
-              cmdArgs.push("--file", file);
-            }
-            if (args.mode !== undefined) cmdArgs.push("--mode", args.mode);
-          } else {
-            if (args.output === undefined) throw new Error("download requires output");
-            requireNonEmpty(args.output, "output");
-            cmdArgs.push("--out", args.output);
-            if (args.overwrite === true) cmdArgs.push("--overwrite");
-          }
-          cmdArgs.push("--", args.target);
-          const reply = (await runtime.run(
-            exec,
-            cmdArgs,
-            action,
-            sessionId,
-            runnerTimeout(deps, timeoutMs),
-          )) as Record<string, unknown>;
-          return { ...reply, session: sessionId } as never;
-        },
-        presentCall: (args) => ({
-          card: "terminal",
-          title: runtime.commandLine([
-            action,
-            "--session",
-            args.session ?? "(current)",
-            args.target,
-          ]),
-          description: action === "upload" ? "Upload local files" : "Save a browser download",
-        }),
-        presentResult: runtime.presentTerminalResult,
-      }),
-    );
-  }
 
   register(
     defineTool({
@@ -226,13 +81,14 @@ export function registerPhaseOneInteractionTools(
         appendTabId(cmdArgs, args.tabId);
         if (args.modifiers?.length) cmdArgs.push("--modifiers", args.modifiers.join(","));
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
-        if (args.target !== undefined) appendTarget(cmdArgs, args.target);
         const reply = (await runtime.run(
           exec,
           cmdArgs,
           "wheel",
           sessionId,
           runnerTimeout(deps, args.timeoutMs),
+          undefined,
+          args.target,
         )) as {
           tab_id: number;
           x: number;
@@ -320,13 +176,14 @@ export function registerPhaseOneInteractionTools(
         }
         if (args.settleMs !== undefined) cmdArgs.push("--settle", `${args.settleMs}ms`);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
-        appendTarget(cmdArgs, args.target);
         const reply = (await runtime.run(
           exec,
           cmdArgs,
           "hover",
           sessionId,
           runnerTimeout(deps, args.timeoutMs),
+          undefined,
+          args.target,
         )) as { tab_id: number; x: number; y: number };
         return { session: sessionId, tabId: reply.tab_id, x: reply.x, y: reply.y };
       },
@@ -390,13 +247,14 @@ export function registerPhaseOneInteractionTools(
         const cmdArgs = ["scroll-to", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
-        appendTarget(cmdArgs, args.target);
         const reply = (await runtime.run(
           exec,
           cmdArgs,
           "scroll-to",
           sessionId,
           runnerTimeout(deps, args.timeoutMs),
+          undefined,
+          args.target,
         )) as {
           tab_id: number;
           x: number;
@@ -475,13 +333,14 @@ export function registerPhaseOneInteractionTools(
           const cmdArgs = [action, "--session", sessionId];
           appendTabId(cmdArgs, args.tabId);
           if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
-          appendTarget(cmdArgs, args.target);
           const reply = (await runtime.run(
             exec,
             cmdArgs,
             action,
             sessionId,
             runnerTimeout(deps, args.timeoutMs),
+            undefined,
+            args.target,
           )) as {
             tab_id: number;
             focused: boolean;
@@ -569,13 +428,14 @@ export function registerPhaseOneInteractionTools(
         appendTabId(cmdArgs, args.tabId);
         for (const value of args.values) cmdArgs.push("--value", value);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
-        appendTarget(cmdArgs, args.target);
         const reply = (await runtime.run(
           exec,
           cmdArgs,
           "select",
           sessionId,
           runnerTimeout(deps, args.timeoutMs),
+          undefined,
+          args.target,
         )) as {
           tab_id: number;
           multiple: boolean;

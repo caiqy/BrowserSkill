@@ -15,6 +15,7 @@ import {
   type SessionManager,
 } from "@/session-manager/manager";
 import { beginTabCreation } from "@/session-manager/tab-creation";
+import { expectedTabMoves } from "@/session-manager/tab-moves";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
@@ -156,6 +157,35 @@ export const chromeTabMutationApi: TabMutationApi = {
   move: (id, p) => chrome.tabs.move(id, p),
 };
 
+async function moveExpectedTab(
+  tabs: TabMutationApi,
+  tabId: number,
+  properties: chrome.tabs.MoveProperties,
+  signal?: AbortSignal,
+  isLive?: () => boolean,
+  mutate?: CdpRunner["runBrowserMutation"],
+): Promise<chrome.tabs.Tab | chrome.tabs.Tab[]> {
+  const current = await tabs.get(tabId);
+  const move = () => {
+    if (signal?.aborted || isLive?.() === false) {
+      const error = new Error("Tab move aborted before browser mutation");
+      error.name = "AbortError";
+      throw error;
+    }
+    return expectedTabMoves.run(
+      {
+        tabId,
+        fromWindowId: current.windowId,
+        toWindowId: properties.windowId ?? current.windowId,
+      },
+      () => tabs.move(tabId, properties),
+    );
+  };
+  // Finish browser reads before the final authority check. Registration and
+  // native dispatch must then run together without another asynchronous gap.
+  return mutate ? mutate(move) : move();
+}
+
 /**
  * Subset of `chrome.windows` we use for tab_return's fallback path
  * (original window has been closed; pick another normal window or
@@ -182,6 +212,11 @@ export interface AgentOverlayResetApi {
 
 export const chromeAgentOverlayResetApi: AgentOverlayResetApi = {
   async resetAgentOverlays(tabId, sessionId) {
+    // Teardown is best-effort and also runs outside the extension runtime (unit
+    // tests, scripted tooling), where there is no chrome.tabs to message.
+    if (typeof chrome === "undefined" || typeof chrome.tabs?.sendMessage !== "function") {
+      return;
+    }
     const message: OverlayAgentOverlayResetMessage = {
       type: OVERLAY_AGENT_OVERLAY_RESET,
       sessionId,
@@ -292,12 +327,14 @@ export interface TabManagementDeps {
   windows?: ChromeWindowsApi;
   /** Abort hook (M10 will wire the full chain). */
   signal?: AbortSignal;
+  /** Released sessions must not move or close pages during transaction cleanup. */
+  isSessionLive?: () => boolean;
   /** Browser-policy approver. Missing wiring must never silently approve a borrow. */
   approveBorrow?: BorrowConfirmationApprover;
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
   /** Releases this session's CDP claim after a borrowed tab is returned. */
-  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab">;
+  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab" | "runBrowserMutation">;
   /** Runs after tab_return validation, before moving the borrowed tab. */
   beforeReturn?: (sessionId: string, tabId: number) => Promise<void>;
   /**
@@ -310,6 +347,10 @@ export interface TabManagementDeps {
    * default only preserves legacy behaviour for direct/test callers.
    */
   isAgentWindowId?: (windowId: number) => boolean;
+}
+
+function mutateBrowser<T>(deps: TabManagementDeps, operation: () => Promise<T>): Promise<T> {
+  return deps.cdp?.runBrowserMutation ? deps.cdp.runBrowserMutation(operation) : operation();
 }
 
 function getTabsApi(deps: TabManagementDeps): TabMutationApi {
@@ -328,8 +369,14 @@ function getAgentOverlayResetApi(deps: TabManagementDeps): AgentOverlayResetApi 
   return deps.agentOverlayReset ?? chromeAgentOverlayResetApi;
 }
 
-function aborted(signal: AbortSignal | undefined, tool: string): RpcError | null {
-  return signal?.aborted ? { code: "cancelled", message: `${tool} aborted` } : null;
+function aborted(
+  signal: AbortSignal | undefined,
+  tool: string,
+  isLive?: () => boolean,
+): RpcError | null {
+  return signal?.aborted || isLive?.() === false
+    ? { code: "cancelled", message: `${tool} aborted` }
+    : null;
 }
 
 function validatePositiveInt(name: string, value: unknown): RpcError | null {
@@ -401,8 +448,14 @@ async function createAndClaimTab(
 ): Promise<CreatedChromeTab | RpcError> {
   let tab: chrome.tabs.Tab;
   try {
-    tab = await getTabsApi(deps).create(createProps);
+    tab = await mutateBrowser(deps, () => {
+      if (aborted(deps.signal, "tab_create", deps.isSessionLive))
+        throw new Error("tab_create aborted before browser mutation");
+      return getTabsApi(deps).create(createProps);
+    });
   } catch (err) {
+    const cancelled = aborted(deps.signal, "tab_create", deps.isSessionLive);
+    if (cancelled) return cancelled;
     return {
       code: "protocol_error",
       message: err instanceof Error ? err.message : String(err),
@@ -410,6 +463,9 @@ async function createAndClaimTab(
   }
   if (typeof tab.id !== "number") {
     return { code: "protocol_error", message: "chrome.tabs.create returned no tab id" };
+  }
+  if (deps.isSessionLive?.() === false) {
+    return { code: "cancelled", message: "tab_create session ended" };
   }
   // Claim the concrete id returned by Chrome. Ownership never depends on
   // matching this request to an asynchronous onCreated event.
@@ -450,7 +506,8 @@ export async function handleTabCreate(
   const ctxOrErr = lookupSession(manager, params, "tab_create");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  const ab = aborted(deps.signal, "tab_create");
+  const isLive = () => manager.get(ctx.sessionId) === ctx && deps.isSessionLive?.() !== false;
+  const ab = aborted(deps.signal, "tab_create", isLive);
   if (ab) return ab;
 
   const paramErr = validateTabCreateParams(params);
@@ -463,24 +520,22 @@ export async function handleTabCreate(
   const prepare = deps.cdp?.acquireBackgroundExecution && !cdpBlockedUrlReason(props.url);
   const tab = await createTabAndCleanup(
     ctx,
-    deps,
+    { ...deps, isSessionLive: isLive },
     prepare ? { ...props, url: "about:blank" } : props,
   );
   if (isRpcError(tab)) return tab;
+  if (!isLive()) return { code: "cancelled", message: "tab_create session ended" };
   if (prepare) {
     try {
       await deps.cdp!.acquireBackgroundExecution!(ctx.sessionId, tab.id);
-      if (
-        deps.signal?.aborted ||
-        manager.get(ctx.sessionId) !== ctx ||
-        !isAgentControlledTab(ctx, tab.id)
-      ) {
+      if (deps.signal?.aborted || !isLive() || !isAgentControlledTab(ctx, tab.id)) {
         throw new Error("Tab creation cancelled during background execution setup");
       }
       // Preserve create's no-load-wait contract. The destination script cannot run
       // before the blank document's execution policy has been acknowledged.
       if (props.url !== "about:blank") await getTabsApi(deps).update(tab.id, { url: props.url });
-      if (deps.signal?.aborted) throw new Error("Tab creation cancelled during navigation");
+      if (deps.signal?.aborted || !isLive())
+        throw new Error("Tab creation cancelled during navigation");
     } catch (error) {
       const cleanupErrors: string[] = [];
       try {
@@ -488,6 +543,7 @@ export async function handleTabCreate(
       } catch (cleanupError) {
         cleanupErrors.push(`release: ${describeError(cleanupError)}`);
       }
+      if (!isLive()) return { code: "cancelled", message: "tab_create session ended" };
       try {
         await getTabsApi(deps).remove(tab.id);
         ctx.agentCreatedTabs.delete(tab.id);
@@ -620,13 +676,12 @@ export async function handleTabClose(
       }
       closeWindow = tabs.length === 1 && tabs[0]?.id === params.tab_id;
     }
-    if (closeWindow) {
-      // Yandex cancels later debugger attachments if tabs.remove closes a
-      // window's final tab (issue #272). Keep the normal onRemoved lifecycle.
-      await getWindowsApi(deps).remove(ctx.agentWindowId);
-    } else {
-      await getTabsApi(deps).remove(params.tab_id);
-    }
+    // Yandex needs windows.remove for the last tab (issue #272).
+    const close = () =>
+      closeWindow
+        ? getWindowsApi(deps).remove(ctx.agentWindowId)
+        : getTabsApi(deps).remove(params.tab_id);
+    await mutateBrowser(deps, close);
     // Keep the tracking set accurate so session_stop won't try to close a
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);
@@ -669,7 +724,7 @@ export async function handleTabSelect(
     return { code: "cancelled", message: "tab_select aborted" };
   }
   try {
-    await getTabsApi(deps).update(params.tab_id, { active: true });
+    await mutateBrowser(deps, () => getTabsApi(deps).update(params.tab_id, { active: true }));
   } catch (err) {
     return {
       code: "protocol_error",
@@ -699,6 +754,7 @@ interface ExecuteBorrowCoreParams {
   tabsApi: TabMutationApi;
   approveBorrow: BorrowConfirmationApprover;
   signal?: AbortSignal;
+  mutate?: CdpRunner["runBrowserMutation"];
 }
 
 interface ExecuteBorrowCoreOk {
@@ -732,6 +788,13 @@ async function validateBorrowTarget(
   if (typeof tab.id !== "number" || typeof tab.windowId !== "number") {
     return { code: "not_found", message: `tab ${tabId} not found` };
   }
+  if (tab.incognito) {
+    return rpcError(
+      "permission_denied",
+      "incognito_borrow_disabled",
+      "Incognito tabs cannot be borrowed. Create a new tab in the session instead.",
+    );
+  }
   const owner = manager.findControllingSession(tabId);
   if (owner)
     return rpcError(
@@ -740,13 +803,20 @@ async function validateBorrowTarget(
       `tab_borrow: tab ${tabId} is already controlled by session ${owner}`,
     );
   if (tab.windowId === ctx.agentWindowId) {
-    return {
-      code: "invalid_params",
-      message:
-        ctx.remote && !isAgentControlledTab(ctx, tabId)
-          ? `tab_borrow: tab ${tabId} is not authorized and already lives in the Agent Window; move it to a regular browser window, then borrow it`
-          : `tab_borrow: tab ${tabId} already lives in the Agent Window`,
-    };
+    // Issue #465 §6: both branches mean "already inside an Agent Window",
+    // which the reference docs describe as needing a user move to a user
+    // window before borrowing; a tab the session itself opened is already
+    // controlled, so no borrow is needed at all. The stable reason lets
+    // the CLI render this instead of the generic invalid-parameters copy.
+    const lives =
+      ctx.remote && !isAgentControlledTab(ctx, tabId)
+        ? "not authorized and already lives in the Agent Window; a user must move it to a regular browser window, then borrow it"
+        : "already lives in the Agent Window — an unowned tab needs a user move to a user window before borrowing; a tab this session opened is already controlled and needs no borrow";
+    return rpcError(
+      "invalid_params",
+      "borrow_agent_window_tab",
+      `tab_borrow: tab ${tabId} ${lives}`,
+    );
   }
   for (const s of manager.list()) {
     if (s.sessionId !== ctx.sessionId && s.agentWindowId === tab.windowId) {
@@ -806,20 +876,39 @@ async function moveTabForBorrow(
   agentWindowId: number,
   originalWindowId: number,
   originalIndex: number,
+  isLive: () => boolean,
   signal?: AbortSignal,
+  mutate?: CdpRunner["runBrowserMutation"],
 ): Promise<RpcError | null> {
   try {
-    await tabsApi.move(tabId, { windowId: agentWindowId, index: -1 });
+    await moveExpectedTab(
+      tabsApi,
+      tabId,
+      { windowId: agentWindowId, index: -1 },
+      signal,
+      isLive,
+      mutate,
+    );
   } catch (err) {
+    const cancelled = aborted(signal, "tab_borrow", isLive);
+    if (cancelled) return cancelled;
     return {
       code: "cdp_failed",
       message: `tab_borrow: chrome.tabs.move failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+  if (!isLive()) return { code: "cancelled", message: "tab_borrow session ended" };
   if (aborted(signal, "tab_borrow")) {
     try {
-      await tabsApi.move(tabId, { windowId: originalWindowId, index: originalIndex });
+      await moveExpectedTab(
+        tabsApi,
+        tabId,
+        { windowId: originalWindowId, index: originalIndex },
+        undefined,
+        isLive,
+      );
     } catch (rollbackErr) {
+      if (!isLive()) return { code: "cancelled", message: "tab_borrow session ended" };
       return rpcError(
         "protocol_error",
         "borrow_outcome_unknown",
@@ -871,7 +960,9 @@ async function executeBorrowCore(
     p.ctx.agentWindowId,
     originalWindowId,
     originalIndex,
+    () => p.manager.get(p.ctx.sessionId) === p.ctx,
     p.signal,
+    p.mutate,
   );
   if (moveErr) return moveErr;
 
@@ -886,6 +977,13 @@ export async function handleTabBorrow(
   const ctxOrErr = lookupSession(manager, params, "tab_borrow");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
+  if (ctx.incognito) {
+    return rpcError(
+      "permission_denied",
+      "incognito_borrow_disabled",
+      "Incognito sessions cannot borrow tabs. Create a new tab in the session instead.",
+    );
+  }
   const bad = validatePositiveInt("tab_id", params.tab_id);
   if (bad) return bad;
   if (aborted(deps.signal, "tab_borrow")) {
@@ -958,6 +1056,7 @@ export async function handleTabBorrow(
       tabsApi,
       approveBorrow: approve,
       signal: deps.signal,
+      mutate: deps.cdp?.runBrowserMutation,
     });
     if (isRpcError(coreResult)) return coreResult;
 
@@ -969,12 +1068,19 @@ export async function handleTabBorrow(
       });
       committed = true;
     } catch (err) {
+      if (manager.get(ctx.sessionId) !== ctx)
+        return { code: "cancelled", message: "tab_borrow session ended" };
       try {
-        await tabsApi.move(params.tab_id, {
-          windowId: coreResult.originalWindowId,
-          index: coreResult.originalIndex,
-        });
+        await moveExpectedTab(
+          tabsApi,
+          params.tab_id,
+          { windowId: coreResult.originalWindowId, index: coreResult.originalIndex },
+          undefined,
+          () => manager.get(ctx.sessionId) === ctx,
+        );
       } catch (rollbackError) {
+        if (manager.get(ctx.sessionId) !== ctx)
+          return { code: "cancelled", message: "tab_borrow session ended" };
         return rpcError(
           "protocol_error",
           "borrow_outcome_unknown",
@@ -992,20 +1098,28 @@ export async function handleTabBorrow(
     // user tab switches; selecting a tab does not focus its window.
     try {
       const tab = await tabsApi.get(params.tab_id);
+      if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
+        throw new Error("Borrow cancelled during background execution setup");
+      }
       if (!cdpBlockedUrlReason(tab.url)) {
         await deps.cdp?.acquireBackgroundExecution?.(ctx.sessionId, params.tab_id);
       }
       if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
         throw new Error("Borrow cancelled during background execution setup");
       }
-      await tabsApi.update(params.tab_id, { active: true });
+      await mutateBrowser(deps, () => tabsApi.update(params.tab_id, { active: true }));
       if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
         throw new Error("Borrow cancelled during background execution setup");
       }
     } catch (error) {
+      if (manager.get(ctx.sessionId) !== ctx)
+        return { code: "cancelled", message: "tab_borrow session ended" };
       const rollback = await returnBorrowedTab(ctx, params.tab_id, {
         ...deps,
+        // Returning an already moved tab is this transaction's rollback, not new input.
+        cdp: { releaseSessionTab: deps.cdp?.releaseSessionTab?.bind(deps.cdp) },
         signal: undefined,
+        isSessionLive: () => manager.get(ctx.sessionId) === ctx,
         isAgentWindowId: (id) => manager.findByWindowId(id) !== null,
       });
       if (isRpcError(rollback)) return rollback;
@@ -1052,11 +1166,13 @@ async function chooseFallbackWindow(
   windowsApi: ChromeWindowsApi,
   isAgentWindowId: (windowId: number) => boolean,
   signal?: AbortSignal,
+  mutate?: CdpRunner["runBrowserMutation"],
+  isLive?: () => boolean,
 ): Promise<FallbackWindowTarget | RpcError> {
   let lastFocusedError: unknown;
   try {
     const last = await windowsApi.getLastFocused({ windowTypes: ["normal"] });
-    const cancelled = aborted(signal, "tab_return");
+    const cancelled = aborted(signal, "tab_return", isLive);
     if (cancelled) return cancelled;
     const lastId = typeof last?.id === "number" ? last.id : null;
     // Never relocate a user tab into *any* session's Agent Window: this
@@ -1066,28 +1182,38 @@ async function chooseFallbackWindow(
     // returned tab in another session's Agent Window would let that
     // session write to it and, worse, see it destroyed when that session
     // stops and closes its window.
-    if (lastId !== null && lastId !== ctx.agentWindowId && !isAgentWindowId(lastId)) {
+    // Incognito windows also have type "normal", but cannot receive the
+    // non-incognito tabs accepted by tab_borrow.
+    if (
+      lastId !== null &&
+      !last.incognito &&
+      lastId !== ctx.agentWindowId &&
+      !isAgentWindowId(lastId)
+    ) {
       return { windowId: lastId, index: -1, created: false };
     }
   } catch (err) {
     lastFocusedError = err;
   }
 
-  const cancelled = aborted(signal, "tab_return");
+  const cancelled = aborted(signal, "tab_return", isLive);
   if (cancelled) return cancelled;
 
   try {
-    const created = await windowsApi.create({
-      url: NEW_TAB_DEFAULT_URL,
-      focused: false,
-    });
+    const create = () => {
+      if (aborted(signal, "tab_return", isLive))
+        throw new Error("tab_return aborted before fallback window creation");
+      return windowsApi.create({ url: NEW_TAB_DEFAULT_URL, focused: false, incognito: false });
+    };
+    const created = await (mutate ? mutate(create) : create());
     if (typeof created?.id !== "number") {
       return {
         code: "protocol_error",
         message: "tab_return: failed to create fallback window",
       };
     }
-    if (aborted(signal, "tab_return")) {
+    if (isLive?.() === false) return { code: "cancelled", message: "tab_return session ended" };
+    if (aborted(signal, "tab_return", isLive)) {
       try {
         await windowsApi.remove(created.id);
       } catch (cleanupErr) {
@@ -1102,6 +1228,8 @@ async function chooseFallbackWindow(
     }
     return { windowId: created.id, index: 0, created: true };
   } catch (err) {
+    const cancelled = aborted(signal, "tab_return", isLive);
+    if (cancelled) return cancelled;
     const suffix = lastFocusedError
       ? ` (after getLastFocused failed: ${describeError(lastFocusedError)})`
       : "";
@@ -1116,8 +1244,9 @@ async function cleanupUnusedFallbackWindow(
   windowsApi: ChromeWindowsApi,
   target: FallbackWindowTarget,
   reason: string,
+  isLive?: () => boolean,
 ): Promise<RpcError | null> {
-  if (!target.created) return null;
+  if (!target.created || isLive?.() === false) return null;
   try {
     await windowsApi.remove(target.windowId);
     return null;
@@ -1181,7 +1310,7 @@ async function returnBorrowedTabCore(
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
   const isAgentWindowId = getIsAgentWindowId(deps);
-  const alreadyCancelled = aborted(deps.signal, "tab_return");
+  const alreadyCancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (alreadyCancelled) return alreadyCancelled;
 
   let targetWindowId = entry.originalWindowId;
@@ -1197,24 +1326,32 @@ async function returnBorrowedTabCore(
     console.debug("[bsk tab_return] original window gone, falling back", err);
     originalAlive = false;
   }
-  const cancelledAfterLookup = aborted(deps.signal, "tab_return");
+  const cancelledAfterLookup = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (cancelledAfterLookup) return cancelledAfterLookup;
   if (!originalAlive) {
     fallback = true;
-    const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
+    const target = await chooseFallbackWindow(
+      ctx,
+      windowsApi,
+      isAgentWindowId,
+      deps.signal,
+      deps.cdp?.runBrowserMutation,
+      deps.isSessionLive,
+    );
     if ("code" in target) return target;
     fallbackTarget = target;
     targetWindowId = target.windowId;
     targetIndex = target.index;
   }
 
-  const cancelledBeforeMove = aborted(deps.signal, "tab_return");
+  const cancelledBeforeMove = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (cancelledBeforeMove) {
     if (fallbackTarget) {
       const cleanupError = await cleanupUnusedFallbackWindow(
         windowsApi,
         fallbackTarget,
         "tab_return aborted before moving the borrowed tab",
+        deps.isSessionLive,
       );
       if (cleanupError) return cleanupError;
     }
@@ -1222,10 +1359,14 @@ async function returnBorrowedTabCore(
   }
 
   try {
-    const moved = await tabsApi.move(tabId, {
-      windowId: targetWindowId,
-      index: targetIndex,
-    });
+    const moved = await moveExpectedTab(
+      tabsApi,
+      tabId,
+      { windowId: targetWindowId, index: targetIndex },
+      deps.signal,
+      deps.isSessionLive,
+      deps.cdp?.runBrowserMutation,
+    );
     const movedTab = Array.isArray(moved) ? moved[0] : moved;
     const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : targetIndex;
     await releaseReturnedTabState(ctx, tabId, deps);
@@ -1241,33 +1382,46 @@ async function returnBorrowedTabCore(
         windowsApi,
         fallbackTarget,
         `tab_return could not move tab ${tabId}`,
+        deps.isSessionLive,
       );
       if (cleanupError) return cleanupError;
     }
-    const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return");
+    const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return", deps.isSessionLive);
     if (cancelledAfterMoveFailure) return cancelledAfterMoveFailure;
     if (!fallback) {
-      const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
+      const target = await chooseFallbackWindow(
+        ctx,
+        windowsApi,
+        isAgentWindowId,
+        deps.signal,
+        deps.cdp?.runBrowserMutation,
+        deps.isSessionLive,
+      );
       if ("code" in target) {
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback failed: ${target.message}`,
         };
       }
-      const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return");
+      const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return", deps.isSessionLive);
       if (cancelledBeforeFallbackMove) {
         const cleanupError = await cleanupUnusedFallbackWindow(
           windowsApi,
           target,
           "tab_return aborted before fallback move",
+          deps.isSessionLive,
         );
         return cleanupError ?? cancelledBeforeFallbackMove;
       }
       try {
-        const moved = await tabsApi.move(tabId, {
-          windowId: target.windowId,
-          index: target.index,
-        });
+        const moved = await moveExpectedTab(
+          tabsApi,
+          tabId,
+          { windowId: target.windowId, index: target.index },
+          deps.signal,
+          deps.isSessionLive,
+          deps.cdp?.runBrowserMutation,
+        );
         const movedTab = Array.isArray(moved) ? moved[0] : moved;
         const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : target.index;
         await releaseReturnedTabState(ctx, tabId, deps);
@@ -1282,8 +1436,11 @@ async function returnBorrowedTabCore(
           windowsApi,
           target,
           `tab_return fallback move for tab ${tabId} failed`,
+          deps.isSessionLive,
         );
         if (cleanupError) return cleanupError;
+        const cancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
+        if (cancelled) return cancelled;
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback move failed: ${describeError(fallbackErr)}`,
@@ -1319,6 +1476,7 @@ export async function handleTabReturn(
   await deps.beforeReturn?.(ctx.sessionId, params.tab_id);
   const outcome = await returnBorrowedTab(ctx, params.tab_id, {
     ...deps,
+    isSessionLive: () => manager.get(ctx.sessionId) === ctx && deps.isSessionLive?.() !== false,
     isAgentWindowId:
       deps.isAgentWindowId ?? ((windowId) => manager.findByWindowId(windowId) !== null),
   });

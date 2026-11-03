@@ -13,13 +13,14 @@ import { defineConfig } from "wxt";
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(here, "package.json"), "utf8")) as { version: string };
 const EXTENSION_VERSION = pkg.version;
-let EXTENSION_BUILD = "unknown";
+let EXTENSION_BUILD = process.env.BSK_EXT_BUILD ?? "unknown";
 try {
-  EXTENSION_BUILD = execFileSync("git", ["describe", "--always", "--dirty"], {
-    cwd: here,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  if (!process.env.BSK_EXT_BUILD)
+    EXTENSION_BUILD = execFileSync("git", ["describe", "--always", "--dirty"], {
+      cwd: here,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
 } catch {
   /* Source archives need not contain Git metadata. */
 }
@@ -34,6 +35,8 @@ export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: {
     name: "BrowserSkill",
+    version: "0.4.1.1",
+    version_name: `${EXTENSION_VERSION} compat (${EXTENSION_BUILD})`,
     description:
       "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
     // Flat debugger sessions are required to address out-of-process iframes.

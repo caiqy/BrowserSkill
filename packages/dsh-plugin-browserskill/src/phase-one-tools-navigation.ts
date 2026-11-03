@@ -165,13 +165,14 @@ export function registerPhaseOneNavigationTools(
         ];
         appendTabId(cmdArgs, args.tabId);
         if (args.pollMs !== undefined) cmdArgs.push("--poll-ms", String(args.pollMs));
-        cmdArgs.push(args.target);
         const reply = (await runtime.run(
           exec,
           cmdArgs,
           "wait-for-element",
           sessionId,
           runnerTimeout(deps, timeoutMs),
+          undefined,
+          args.target,
         )) as {
           tab_id: number;
           satisfied: boolean;

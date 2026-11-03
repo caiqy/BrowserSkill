@@ -3,11 +3,14 @@
 ## Viewport and full-page screenshots
 
 Without new options, `screenshot` captures the viewport; a fresh `ref` crops to
-that element. For a full-page PNG:
+that element. The full-page examples below are independent opaque actions. Before
+**each** one, sync the same session/tab and read its fresh observation. Replace
+both placeholders with that sync's actual `context_id` and `observation_id`; do
+not reuse the single-use observation receipt for a second capture. For a full-page PNG:
 
 ```text
-bsk_inspect({ action: "screenshot", session: "<id>", fullPage: true, scope: "current", timeoutMs: 120000, output: "C:/task/loaded-page.png" })
-bsk_inspect({ action: "screenshot", session: "<id>", fullPage: true, scope: "follow" })
+bsk_inspect({ action: "screenshot", session: "<id>", contextId: "<sync-context>", observationId: "<sync-observation>", fullPage: true, scope: "current", timeoutMs: 120000, output: "C:/task/loaded-page.png" })
+bsk_inspect({ action: "screenshot", session: "<id>", contextId: "<sync-context>", observationId: "<sync-observation>", fullPage: true, scope: "follow" })
 ```
 
 `fullPage` scrolls and stitches the page, so it can trigger lazy loading and page
@@ -52,12 +55,16 @@ an image-capable model and continue with available semantics.
 
 ```text
 bsk_inspect({ action: "screenshot", session: "<id>", ref: "@e3" })
-bsk_interact({ action: "click", session: "<id>", target: "@e3", captureId: "<capture-id>", imageX: 100, imageY: 50 })
+bsk_interact({ action: "click", session: "<id>", target: "@e3", contextId: "<sync-context>", observationId: "<sync-observation>", captureId: "<capture-id>", imageX: 100, imageY: 50 })
 ```
 
+Under target policy, sync first and retain its context/observation receipts, then observe
+and screenshot the visual ref. The strict baseline is the sync's `observation_id`, not
+the newer observe response's token. Supplementary reads do not replace that baseline.
 Use the returned captureId with observed ORIGINAL PNG pixels, not resized
-or viewport coordinates. Captures are single-use, last 2m, and expire on ref replacement
-or a newer screenshot of that ref. `captureUnavailable` is view-only: observe and
+or viewport coordinates. Captures are single-use, last 2m, and expire on another
+observe/snapshot/continuation or a newer screenshot of that ref, even when DOM refs stay stable.
+`captureUnavailable` is view-only: observe and
 screenshot again before clicking. Counts 1/2, buttons/modifiers work; Canvas
 fill/IME/drag/hover/HTML do not. Repainting is allowed. Verify results; use DOM refs
 for revealed controls. Inspect `effect_state=unknown` before retrying with a new capture.

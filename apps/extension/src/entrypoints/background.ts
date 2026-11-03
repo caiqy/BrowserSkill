@@ -1,5 +1,6 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { attachCooperation } from "@/cooperation/browser-bridge";
 import { LocalDebugArchive } from "@/debug/archive";
 import { attachDebugBridge } from "@/debug/bridge";
 import { DebugManager } from "@/debug/manager";
@@ -7,6 +8,7 @@ import { getAuditEnabled } from "@/lib/audit";
 import { attachAuditBridge } from "@/lib/audit-bridge";
 import { ConnectionController } from "@/lib/connection-controller";
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
+import { attachDaemonUpgradeNotice } from "@/lib/daemon-upgrade-notice";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
@@ -52,6 +54,7 @@ import {
   attachRecordFinishListener,
   attachRecordQueryListener,
   attachRecordStepListener,
+  clearRecordingForSession,
   hasActiveRecording,
   type RecordRuntimeDeps,
 } from "@/tools/record";
@@ -88,6 +91,42 @@ export default defineBackground(() => {
     },
   });
   const sessions = new SessionManager({ remote: () => remoteEndpoint !== null });
+  // Capture the original owner before cooperation releases a detached page.
+  attachSessionEventHandler({
+    manager: sessions,
+    transport,
+    cdp: {
+      detachSession: (id) => cdp.detachSession(id),
+      releaseSessionTab: (id, tabId) => cdp.releaseSessionTab(id, tabId),
+    },
+    onSessionReleased: (ctx) => {
+      dispatcher.cancelSession(ctx.sessionId);
+      cooperation.release(ctx.sessionId);
+      clearRecordingForSession(ctx.sessionId);
+    },
+    onSessionsChanged: onOverlaySessionStateChanged,
+  });
+  const cooperation = attachCooperation(
+    sessions,
+    (tabId) => {
+      void chrome.tabs
+        .get(tabId)
+        .then((tab) => pushOverlayStateForTab(tabId, tab.windowId))
+        .catch(() => {});
+    },
+    (sessionId, idleProtected) => {
+      try {
+        transport.send({
+          event: "session.activity",
+          payload: { session_id: sessionId, idle_protected: idleProtected },
+        });
+      } catch {
+        /* Disconnect cleanup ends the owning sessions. */
+      }
+    },
+  );
+  // Default collaboration is always present; only explicit help or recording
+  // suspends routing of unrelated tabs out of the task window.
   const windowRouting = new AgentWindowRouting(
     sessions,
     chrome,
@@ -98,16 +137,20 @@ export default defineBackground(() => {
   });
   attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
-    onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
-    shouldAutoAcceptDialog: async (tabId) => {
+    onDocumentChanged: (tabId, event) => {
+      sessions.invalidateTabRefs(tabId);
+      cooperation.invalidate(tabId, event);
+    },
+    canControlDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);
-      return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
+      return session !== null && isAgentControlledTab(session, tabId);
     },
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
   attachDebugBridge(sessions, debug);
   const videoHost = new BrowserVideoHost();
+  let upgradeNotice: ReturnType<typeof attachDaemonUpgradeNotice> | undefined;
   const video = new VideoManager({
     sessions,
     cdp,
@@ -140,9 +183,13 @@ export default defineBackground(() => {
       }
     },
     changed: () => {
-      void chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
-      void chrome.action.setBadgeText({ text: video.isRecording() ? "REC" : "" });
+      upgradeNotice?.refresh();
     },
+  });
+  upgradeNotice = attachDaemonUpgradeNotice({
+    controller,
+    connectionKey: () => requestedConnection?.key ?? "unavailable",
+    isRecording: () => video.isRecording(),
   });
   attachVideoBridge(video, videoHost, (sessionId) => handleOverlayInterrupt(transport, sessionId));
   chrome.webNavigation.onBeforeNavigate.addListener((details) => {
@@ -236,7 +283,11 @@ export default defineBackground(() => {
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
       const ctx = sessions.findByWindowId(windowId);
-      if (ctx && isAgentControlledTab(ctx, tabId)) return overlayStateForWindow(windowId);
+      if (ctx && isAgentControlledTab(ctx, tabId))
+        return {
+          ...overlayStateForWindow(windowId),
+          cooperation: cooperation.view(tabId),
+        };
     }
     return {
       type: OVERLAY_AGENT_STATE,
@@ -280,6 +331,7 @@ export default defineBackground(() => {
   }
 
   function onOverlaySessionStateChanged(): void {
+    cooperation.syncSessions();
     windowRouting.sync();
     debug.sync();
     video.sync();
@@ -317,6 +369,10 @@ export default defineBackground(() => {
     if (typeof tab.windowId !== "number" || typeof tab.id !== "number") return;
     if (!sessions.findByWindowId(tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
+  });
+  chrome.tabs.onAttached.addListener((tabId, { newWindowId }) => {
+    // Refresh controls after Chrome finishes moving the page.
+    void pushOverlayStateForTab(tabId, newWindowId);
   });
   chrome.tabs.onDetached.addListener((tabId) => {
     void video.stopTab(tabId, "session_ended").catch(() => {});
@@ -388,6 +444,7 @@ export default defineBackground(() => {
   });
   void interactionPreferences.readyOrFallback();
   const dispatcher = new ToolDispatcher({
+    cooperation,
     debug,
     video,
     interactionPreferences,
@@ -398,6 +455,7 @@ export default defineBackground(() => {
     onSessionsChanged: onOverlaySessionStateChanged,
     onBrowserControlResumed,
     onAgentTabClaimed: (tabId, windowId) => {
+      void cooperation.observeTab(tabId).catch(() => {});
       void pushOverlayStateForTab(tabId, windowId);
     },
     approveBorrow: async (ctx) => {
@@ -451,13 +509,6 @@ export default defineBackground(() => {
       "[browser-skill] chrome.notifications.onButtonClicked unavailable; borrow Allow/Deny buttons will be inactive",
     );
   }
-  attachSessionEventHandler({
-    manager: sessions,
-    transport,
-    cdp,
-    onSessionsChanged: onOverlaySessionStateChanged,
-  });
-
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5
   // C3 + C4). Every 30s the alarm wakes the SW; if the transport is
   // not connected we force a fresh connect attempt so we never sit on
@@ -552,6 +603,7 @@ export default defineBackground(() => {
     if (msg.kind === OVERLAY_MSG_INTERRUPT) {
       const req = msg as OverlayInterruptRequest;
       const ctx = sessions.get(req.sessionId);
+      if (ctx) cooperation.stopSession(ctx.sessionId);
       if (ctx) setControlMode(req.sessionId, "interrupting");
       void handleOverlayInterrupt(transport, req.sessionId).then((reply) => {
         if (reply.ok && sessions.get(req.sessionId)) {

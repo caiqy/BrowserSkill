@@ -1,4 +1,4 @@
-import { type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -50,6 +50,7 @@ function setup(
     acquireForeground: vi.fn(() => vi.fn()),
     beginAction: vi.fn(),
     endAction: vi.fn(),
+    setUrl: vi.fn(),
   };
   const runner = { run: vi.fn(run), killAll() {}, killFor: () => 0 };
   registerBrowserTools({
@@ -88,6 +89,7 @@ describe("enhanced public routes", () => {
   it.each([
     {},
     { awaitPromise: false, returnByValue: false },
+    { awaitPromise: true, returnByValue: true },
   ])("maps evaluate defaults and explicit false: %j", async (options) => {
     const { call, runner, tool } = setup();
     await expect(
@@ -105,14 +107,12 @@ describe("enhanced public routes", () => {
         "evaluate",
         "--session",
         "s1",
-        "--await-promise",
-        String(options.awaitPromise ?? true),
-        "--return-by-value",
-        String(options.returnByValue ?? true),
-        "--timeout",
-        "2000ms",
         "--tab-id",
         "7",
+        ...(options.awaitPromise === false ? ["--await-promise", "false"] : []),
+        ...(options.returnByValue === false ? ["--return-by-value", "false"] : []),
+        "--timeout",
+        "2000ms",
         "--",
         "Promise.resolve(3)",
       ],
@@ -121,18 +121,20 @@ describe("enhanced public routes", () => {
     expect(tool("bsk_interact").isConcurrencySafe?.({ action: "evaluate" } as never)).toBe(false);
   });
 
-  it("rejects a page exception at exit zero before observation reports completion", async () => {
+  it("preserves official structured page exceptions at exit zero", async () => {
     const error = { text: "Error: page boom", line: 2, column: 4, stack: "at page.js:2:4" };
-    const { call, observation } = setup(async () => json({ ok: false, tab_id: 7, error }));
+    const dialogs = [{ type: "alert", message: "page detail" }];
+    const { call, observation } = setup(async () => json({ ok: false, tab_id: 7, error, dialogs }));
     await expect(
       call("bsk_interact", { action: "evaluate", expression: "throwing()" }),
-    ).rejects.toThrow("page boom");
-    expect(observation.endAction).toHaveBeenCalledWith("s1", expect.stringContaining("page boom"));
+    ).resolves.toEqual({ session: "s1", ok: false, tab_id: 7, error, dialogs });
+    expect(observation.endAction).toHaveBeenCalledWith("s1", undefined);
   });
 
   it.each([
     { action: "evaluate", expression: "   " },
     { action: "upload", target: "#files", files: [] },
+    { action: "upload", target: "#files", files: Array.from({ length: 21 }, () => "a.txt") },
     { action: "upload", target: "#files", files: [" "] },
     { action: "upload", target: "#files", files: ["a.txt"], mode: "invalid" },
     { action: "download", target: "#save" },
@@ -172,8 +174,6 @@ describe("enhanced public routes", () => {
       "upload",
       "--session",
       "s1",
-      "--timeout",
-      "120000ms",
       "--tab-id",
       "7",
       ...files.flatMap((file) => ["--file", file]),
@@ -203,11 +203,11 @@ describe("enhanced public routes", () => {
       "download",
       "--session",
       "s1",
-      "--timeout",
-      "5000ms",
       "--out",
       "out.txt",
       ...(overwrite === true ? ["--overwrite"] : []),
+      "--timeout",
+      "5000ms",
       "--",
       "#save",
     ]);
@@ -360,23 +360,98 @@ describe("enhanced public routes", () => {
       return child as unknown as ChildProcess;
     });
     const { call } = setup((args, options) => runner.run(args, options));
-    for (const action of ["evaluate", "upload", "download"]) {
-      await call("bsk_interact", {
-        action,
-        expression: "-1",
-        target: "--target",
-        files: ["a.txt"],
-        output: "out.txt",
-      });
-      const args = argv.at(-1)!;
-      expect(args[0]).toBe("--json");
-      expect(args.indexOf("--json")).toBeLessThan(args.indexOf("--"));
-      expect(args.slice(args.indexOf("--") + 1)).toEqual([
-        action === "evaluate" ? "-1" : "--target",
-      ]);
+    const routes = [
+      ...[
+        "evaluate",
+        "upload",
+        "download",
+        "click",
+        "fill",
+        "wheel",
+        "hover",
+        "scroll-to",
+        "focus",
+        "blur",
+        "select",
+        "drag",
+        "press",
+      ].map((action) => ["bsk_interact", action]),
+      ["bsk_page", "wait-for-element"],
+      ["bsk_page", "navigate"],
+    ];
+    for (const [name, action] of routes) {
+      for (const literal of ["-1", "--literal-target", "--"]) {
+        await call(name, {
+          action,
+          expression: literal,
+          target: literal,
+          key: literal,
+          url: literal,
+          value: "changed",
+          values: ["chosen"],
+          deltaY: action === "wheel" ? 1 : undefined,
+          to: action === "drag" ? "#destination" : undefined,
+          files: ["--"],
+          output: "--",
+          contextId: "ctx-observed",
+          observationId: "receipt-observed",
+          dependsOn: ["@e1"],
+          expect: [{ target: "#price", field: "text", equals: "42" }],
+        });
+        const args = argv.at(-1)!;
+        expect(args[0]).toBe("--json");
+        expect(args.slice(-2)).toEqual(["--", literal]);
+        const flags = args.slice(0, -2);
+        expect(flags).toEqual(
+          expect.arrayContaining([
+            "--context",
+            "ctx-observed",
+            action === "drag" ? "--observation-id" : "--observation",
+            "receipt-observed",
+            "--depends-on",
+            "@e1",
+            "--expect",
+            JSON.stringify([{ target: "#price", field: "text", equals: "42" }]),
+          ]),
+        );
+        if (action === "upload") expect(flags).toEqual(expect.arrayContaining(["--file", "--"]));
+        if (action === "download") expect(flags).toEqual(expect.arrayContaining(["--out", "--"]));
+      }
     }
   });
 });
+
+it.skipIf(!process.env.BSK_PARSER_TEST_PATH)(
+  "parses guarded public targets in the real CLI without dispatching an action",
+  async () => {
+    const runner = createBskRunner(process.env.BSK_PARSER_TEST_PATH!, (command, args, options) => {
+      const parserArgs = [...args];
+      // Missing required --session guarantees Clap rejects before any browser dispatch.
+      parserArgs.splice(parserArgs.indexOf("--session"), 2);
+      return spawn(command, parserArgs, options);
+    });
+    const { call } = setup((args, options) => runner.run(args, options));
+    for (const action of ["click", "fill", "download"]) {
+      await expect(
+        call("bsk_interact", {
+          action,
+          target: "--literal-target",
+          value: "changed",
+          output: "parser-only-output",
+          contextId: "parser-context",
+          observationId: "parser-observation",
+          expect: [{ target: "--literal-target", field: "exists", equals: true }],
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_params",
+        data: {
+          reason: "cli_parse_error",
+          details: expect.stringContaining("required arguments were not provided"),
+        },
+      });
+    }
+  },
+);
 
 describe("HTML export", () => {
   const html = "<main>你好🌍</main>";

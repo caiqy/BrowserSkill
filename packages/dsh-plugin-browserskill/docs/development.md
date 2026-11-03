@@ -13,6 +13,17 @@ extension perform the browser operations. The published package name is also the
 Cordis plugin id, client bundle registration id, and `cordis.patch.yml` plugin name.
 Keep these identifiers aligned so dsh can load both halves of the plugin.
 
+The 0.4.1 baseline keeps the official shared-control protocol. A model-facing
+`sync` returns `context_id` and `observation_id`; the public wrapper forwards
+`contextId`, `observationId`, `dependsOn` and `expect` through the same executor.
+Target policy permits context reuse for DOM actions and supplementary reads;
+opaque actions still require an unconsumed observation, and human input or a new
+document revokes control. Do not add a compatibility path that removes these
+checks. Page-script exceptions remain structured `ok:false` results, while
+process, transport, timeout and cancellation failures retain their actual status.
+The executor places global flags before an explicit `--` and appends the literal
+expression or target once, without inferring separators from option values.
+
 ## Tool registration contract
 
 `src/tool-names.json` is the shared public-name contract for host registration,
@@ -114,8 +125,9 @@ also disposes the start journal, runner, and observation service.
   The host also serves `POST /bsk-observation/interrupt`, `POST /bsk-observation/stop`, and
   `GET /bsk-observation/thumbnail/<attachmentId>` through the dsh `webServer` route seam
   (dsh 0.1's Typert Remote pipeline is closed to out-of-tree packages). All commands for one
-  session — tool calls and frame captures alike — run through a per-session FIFO, because the
-  daemon accepts only one unfinished command per session.
+  session normally run through a per-session FIFO, including frame captures. Official
+  shared-control reads bypass that action queue after pending capture cancellation settles,
+  so status and hand-back cannot be stranded behind an action they need to release.
 - **Programmatic subscription**: `ObservationService.subscribe(listener, { thumbnails: false })`
   subscribes to state without requesting screenshots. On an active service, the listener receives
   the initial `snapshot` synchronously, before `subscribe` returns, then receives subsequent
@@ -133,8 +145,11 @@ also disposes the start journal, runner, and observation service.
 
 ## Tool results and cancellation
 
-- **Cancellation**: aborting a tool call (`exec.signal`) kills the underlying bsk child process,
-  matching BrowserSkill's cooperative tool-cancellation model.
+- **Cancellation**: `exec.signal` requests cooperative CLI cancellation. On Windows the
+  runner closes stdin with `BSK_CANCEL_ON_STDIN_CLOSE=1`; elsewhere it sends SIGINT,
+  then uses a bounded forced-stop fallback. UTF8 output and completed step receipts
+  are drained before settlement. A step executes once; do not replay its input when
+  cancellation or a post-action read needs attention.
 - **UI cards**: calls render as terminal cards (command line as title, output as the completed
   card). Screenshots additionally attach the image itself when the host mounts an attachment store
   and the active model route declares image input; otherwise the PNG path is returned.

@@ -1,118 +1,90 @@
 # DSH 插件增强交付说明
 
-此分支在官方 DSH 插件上维护小补丁，复用官方 CLI、daemon 及 Chrome/Edge 扩展。本文的接口说明是候选实现契约；构建命令不等于执行证据，未完成的真实验收见文末。
+此分支合入官方稳定版，再保留官方 DSH 接口尚未等效覆盖的小型适配。CLI、daemon 保持官方 0.4.1；本次已确认范围另含独立标识的扩展后台兼容候选，协议保持 1.8。本文说明源码契约与复现方式；命令不等于执行证据，最终结果以对应 Comet 验收记录和候选报告为准。
 
-| 项目 | 固定基线或边界 |
+| 项目 | 固定来源或边界 |
 | --- | --- |
-| 官方 tag / commit | `dsh-plugin-v0.3.3` / `d9a78aed47874459ae1e44523a597e42dd9acf99` |
-| 实现仓库 / 分支 | `packages/browser-skill` / `dsh/plugin-parity-0.3.3` |
-| 发行包名及插件注册 ID | `@caiqy/browser-skill-dsh-plugin`；patch entry 仍为 `browserskill`，客户端 loader ID 与发行包名一致 |
-| 当前发行版本 | `0.3.3-dsh.3`，npm dist-tag 为 `dsh`；此前本地 `0.3.3-dsh.1` 保留原 tag 和交付记录 |
-| 组件 | 官方 0.3.3 能力配套的 CLI、daemon 和浏览器扩展；运行时版本必须另行核实 |
-| 非目标 | 不做用户操作轨迹录制（旧交接功能 A5）；保留已有 video；不增 PDF、原生拖拽、任意 CDP、远程浏览器文件传输或自定义扩展/二进制 |
+| 官方 tag / commit | `dsh-plugin-v0.4.1` / `b8f2d4f0fa35c8c7c866229e1cf3b3329ae39de5` |
+| 长期增强分支 | `dsh/plugin-parity-0.3.3`；名称中的旧版本表示初始基线 |
+| 发行包及客户端 loader | `@caiqy/browser-skill-dsh-plugin`；Cordis patch entry 保持 `browserskill` |
+| 本次候选 | `0.4.1-dsh.1`；候选不表示已发布，公开版本以 npm 和市场索引为准 |
+| 配套组件 | 官方 CLI/daemon 0.4.1、协议 1.8；扩展应用 0.4.1-dsh.1、数字 manifest 0.4.1.1，单独记录 build/source/hash |
+| 非目标 | 自定义 Rust CLI/daemon、协议或宿主；操作轨迹录制、PDF、任意 CDP、远程文件传输、自动更新服务；不整批吸收 upstream/main |
 
-公开工具仍为六个 `bsk_*`。新增能力经过原会话归属、FIFO、超时、取消与观察链路；`evaluate`、主动悬停及整页截图会影响页面。`browsers` 与 `wait-ms` 是不要求创建会话的 daemon 级操作。`list` 仍只列插件拥有的会话。HTTP 路由与附件授权边界不变。
+兼容修复以当前请求授权为边界，复用现有 controller/guard/driver 后台许可；人工接管、取消、导航与页面身份变化仍可撤销，不因渲染许可而放宽控制。多持有者分别释放，未知效果先只读核对再停止。后台截图和 Edge 上传须以对应配套候选的真实报告为准，旧候选分项通过不代表新修复已完成。
 
-## 结构化工具示例
+六个公开 `bsk_*` 工具保持原名；会话所有权、取消、清理、附件和本地 HTTP 路由的信任边界保持。官方 evaluate/upload/download 适配替代旧重复实现；官方 drag、step、view、incognito、原生对话框和待完成操作恢复一并保留。
 
-调用前加载插件 skill，按实际结果替换 ID、ref 和路径。以下文件路径在插件/CLI 所在电脑，不是远程浏览器电脑。示例是使用说明，尚不证明当前候选已通过真实浏览器验收。
+## 控制流程与行为变化
+
+先加载当前包的 `browser-skill`，核实浏览器实例，使用 `bsk_session` 创建自有会话。正常页面操作前执行 `sync`，使用实际返回的 `context_id` 作为 `contextId`。默认 target 策略允许 DOM 操作与补充读取复用上下文；业务事实使用 `expect` 保护。脚本、无目标按键和视觉操作还需要该次 sync 返回且未消费的 `observation_id`。人工输入或文档替换撤销控制后重新同步，不自动重试未知结果的动作。
 
 ```text
 bsk_session({ action: "browsers" })
 bsk_session({ action: "start", browser: "<verified-instance-id>", name: "DSH enhancement smoke" })
-bsk_interact({ action: "evaluate", session: "<id>", expression: "Promise.resolve(document.title)", awaitPromise: true, returnByValue: true, timeoutMs: 10000 })
-bsk_interact({ action: "upload", session: "<id>", target: "@e3", files: ["C:/task/a.txt", "C:/task/b.txt"], mode: "input" })
-bsk_interact({ action: "upload", session: "<id>", target: "@e4", files: ["C:/task/a.txt"], mode: "drop" })
-bsk_interact({ action: "download", session: "<id>", target: "@e5", output: "C:/task/result.txt", overwrite: false })
-bsk_inspect({ action: "screenshot", session: "<id>", fullPage: true, scope: "current", timeoutMs: 120000, output: "C:/task/page.png" })
-bsk_assist({ action: "emulate", session: "<id>", device: "iphone-14", width: 420, dpr: 2, ua: "Mozilla/5.0 task-test", acceptLanguage: "zh-CN", mobile: false, touch: true, maxTouchPoints: 5 })
-bsk_inspect({ action: "observe", session: "<id>", probeHover: true, debugSurfaces: true })
-bsk_inspect({ action: "html", session: "<id>", maxBytes: 65536, output: "C:/task/page.html" })
-bsk_page({ action: "wait-ms", durationMs: 250 })
-bsk_assist({ action: "emulate", session: "<id>", off: true })
-bsk_session({ action: "stop", session: "<id>" })
+bsk_session({ action: "sync", session: "<owned-session-id>" })
+bsk_interact({ action: "evaluate", session: "<owned-session-id>", contextId: "<received-context-id>", observationId: "<received-observation-id>", expression: "Promise.resolve(document.title)", awaitPromise: true, returnByValue: true })
 ```
 
-- `evaluate` 要求非空 expression，默认等待 Promise、按值返回；显式 false 保留。页面异常即使底层 exit 0 仍是失败，超时/取消不能当成功。详见 [JS 与文件传输](../skill/references/interaction-details.md)。
-- upload 的 files 非空，默认 input，drop 使用投放目标；download 必须给 output，默认不覆盖，仅明确允许后使用 overwrite:true，沿用官方暂存、原子提交与释放。
-- fullPage 与 ref/裁剪互斥；scope 需 fullPage:true，默认 follow 跟随追加内容，current 限初始文档高度。截图和 HTML 显式 output 都独占新建且保留用户文件；截图仍有原附件预览。HTML 无 output 保留内联正文，有 output 只返回 path、UTF-8 writtenBytes、原始 byteSize、truncated 等元数据，不重复正文。详见 [截图与 HTML](../skill/references/screenshots-and-canvas.md)。
-- emulate 的手动值覆盖预设，预设可补齐宽高；mobile:false/touch:false 显式关闭。dpr/mobile 需尺寸或预设，acceptLanguage 需 ua/预设，maxTouchPoints 为正整数并隐含启用 touch，但显式 touch:false 优先于预设和 maxTouchPoints，仍关闭触摸。off:true 与任何覆盖（包括 false）互斥。probeHover/debugSurfaces 默认关闭；主动悬停会触发事件，返回实际 hoverProbe/debug/dialogs，不与页面操作并发。wait-ms 接受整数 0..300000，可取消，完成只代表时间经过；原 wait 仍是生命周期等待。详见 [交互细节](../skill/references/interaction-details.md)。
-- browsers 不创建/切换会话，仅返回官方实际字段；指定 profile 仍须核实实例映射并明确传 browser，目标不可用时停止。name 进入原 tracked start，不改变恢复、日志、失败清理或所有权。详见 [浏览器与会话](../skill/references/tabs-and-profiles.md)。
+上述 ID 必须替换为实际结果；示例只说明接口。每次后续操作按当前证据重新决定参数，不能机械重复同一观察凭据。`observe`、HTML、viewport screenshot 和历史 `view` 本身不授予新的行动权限。`step` 组合一次行动、可选就绪检查和只读 post-sync；检查其 `ok/action/readiness/post`，不能因后置读取失败而重新输入。原生对话框出现时，按官方 dialog 与 operation-await/cancel 恢复原操作，不能重复发起下载或脚本。
+
+- evaluate 默认等待 Promise、按值返回，显式 false 保留。页面异常返回正常工具结果中的 `ok:false/error` 及存在时的可选 `dialogs`，调用方必须检查；进程、传输、超时及取消仍按实际失败报告。`returnByValue:false` 返回序列化描述，不提供可直接操纵的进程内 JS 对象。
+- upload 验证 1..20 个本机文件，支持 input/drop；download 必须指定本机 output，默认不覆盖，明确授权覆盖才使用 overwrite:true。复用官方传输归属、暂存、原子提交与释放机制。
+- 所有 CLI 全局控制 flags 位于 `--` 前，表达式或目标字面量作为其后的单个参数，保留前导连字符和 Unicode；不通过 shell 拼接或去除守卫解决参数问题。
+
+详细操作与参数见包内 [skill](../skill/SKILL.md) 及其条件引用；该入口只包含公开工具示例。
+
+## 保留的七类增强
+
+| 能力 | 行为 |
+| --- | --- |
+| fullPage screenshot | `scope:current/follow`、tabId/timeout、附件预览与显式新文件共存；output 排他创建，EEXIST 保留旧文件，stop 后保留显式输出；fullPage 与 ref/裁剪互斥 |
+| browsers | 无会话读取官方实际 metadata，不创建或切换会话；指定 profile 须核实映射并显式传 browser，目标不可用时停止 |
+| emulate | 全部尺寸、dpr、UA、language、mobile/touch/maxTouchPoints、tabId 及预设覆盖；false 保留，off 与任何覆盖互斥；按官方控制要求传凭据 |
+| observe 诊断 | probeHover/debugSurfaces 默认关闭，保留 tabId、hoverProbe/debug/dialogs；主动探针可能触发页面事件，不与页面输入并发 |
+| HTML output | 内联正文行为保持；显式 output 按 UTF8 排他新建，返回实际 writtenBytes、原始 byteSize、truncated 等，不重复正文；失败只清理自己未完成的文件 |
+| wait-ms | daemon 级无会话整数 0..300000ms，可取消；完成只说明时间经过，不能证明页面业务就绪 |
+| start name | 在官方 tracked/recoverable start 和 incognito 上叠加名称，不改变所有权、恢复和失败清理 |
+
+路径均在插件/CLI 所在电脑。隐身会话需要浏览器明确允许扩展在隐身模式运行；不能借用普通标签或降级成普通会话。
 
 ## 可复现构建与打包
 
-在 BrowserSkill 独立 workspace 根执行；根 dsh-plugins workspace 的构建不覆盖此包。使用现有依赖与 pnpm 10.17.0；Node 基线以仓库配置为准，需要安装/切换 SDK 时用 vfox。下列是交付复现步骤，执行前确保依赖已准备，不能用旧 lib 证明源码正确。
+在 BrowserSkill 独立 workspace 根执行，使用该仓库的 pnpm 10.17.0 和现有依赖；根 dsh-plugins workspace 检查不覆盖此包。SDK 安装或切换使用 vfox。先构建当前源码，再打包当前生成物。
 
 ```sh
 corepack pnpm --filter @caiqy/browser-skill-dsh-plugin typecheck
-corepack pnpm --filter @caiqy/browser-skill-dsh-plugin test
 corepack pnpm --filter @caiqy/browser-skill-dsh-plugin build
+corepack pnpm --filter @caiqy/browser-skill-dsh-plugin test
 node scripts/check-dsh-package.mjs
 npm pack ./packages/dsh-plugin-browserskill --ignore-scripts --pack-destination .
-corepack pnpm dlx publint@0.3.25 run ./caiqy-browser-skill-dsh-plugin-0.3.3-dsh.3.tgz
 ```
 
-官方基线虽有 `lint:publint` 脚本，却未声明或安装 publint；上方用固定版本的临时 dlx 工具执行相同检查，不改项目依赖或锁文件。官方客户端 CSS 构建的 classMap 键顺序不固定，重复构建可能仅此处字节不同；交付一致性检查只对这些纯字符串 CSS 映射排序后比较，其他客户端代码及 runtime、类型、skill 和包元数据保持逐字节检查。
-
-先完成 build，再用上方 `npm pack --ignore-scripts` 从当前生成物打包到 workspace 根，随后 publint 直接检查该 tgz；避免 dlx 的 cwd/包管理器推断选中 monorepo 根包。常规 pack 的 prepack 会重复构建，当前流程已显式完成构建，因此关闭脚本。当前发行包为 `caiqy-browser-skill-dsh-plugin-0.3.3-dsh.3.tgz`；按实际命令输出确认位置。包保留 lib、skill、patch、LICENSE 和客户端资源。check-dsh-package 在无关 cwd 检查实际归档及技能资源解析，使用 fake runner，不替代浏览器实测。技能入口含 frontmatter 的 UTF-8 总大小仍限 4500 字节，各 references 必须从入口直接路由；构建器生成内容，不手改生成文件。
-
-开发中仅核对技能时可使用：
-
-```sh
-corepack pnpm --filter @caiqy/browser-skill-dsh-plugin build:skill
-corepack pnpm --filter @caiqy/browser-skill-dsh-plugin exec vitest run tests/skill.test.ts
-node scripts/check-skill-bundles.mjs
-node --test scripts/check-skill-bundles.test.mjs
-```
+归档名应为 `caiqy-browser-skill-dsh-plugin-0.4.1-dsh.1.tgz`，以实际 pack 回执为准；记录其哈希和对应源码提交。包应包含 lib、客户端资源、skill、patch 和 LICENSE。包检查在无关 cwd 解析实际归档与技能资源，使用 fake runner，不能替代真实浏览器验证。不手改生成的 lib 或技能 bundle；技能入口与引用预算由构建和测试检查。
 
 ## 候选包真实冒烟
 
-从 BrowserSkill workspace 运行以下脚本，使用新的结果目录。它解包 tgz，在无关 cwd 通过包的 `apply` 注册六工具并使用默认真实 runner；不安装到任何 profile。已安装的 peer 依赖仅链接到临时目录；本地 HTTP 页面、数据、临时目录和自有会话由脚本清理。Chrome/Edge 参数必须是当次核实的实例，目标不可用时停止该浏览器测试。
+从 BrowserSkill workspace 运行；结果目录须为本次新目录，Chrome/Edge 参数为当次核实的实例。
 
 ```sh
 node packages/dsh-plugin-browserskill/scripts/test-enhancement-live.mjs <absolute-candidate.tgz> <new-absolute-results-dir> <verified-chrome-id> <verified-edge-id>
-# 可追加 chrome 或 edge 只补测某浏览器；再追加以逗号分隔的 feature 名仅补测这些特性。
+# 可追加 chrome 或 edge，仅测该浏览器；再追加逗号分隔的 feature 名补测。
 ```
 
-脚本保存实际调用与逐项结果、截图、HTML 和下载内容。截图使用真实 PNG，附件保存及 renderer 使用本地宿主接口 fixture，证明字节与 image block 路径；此结果不代表真实 DSH GUI 的显示或授权接口已经验收。BrowserSkill 的文件上传需要对应扩展开启“允许访问文件网址”；缺少权限时保留官方错误，由用户处理权限后补测，不能记为成功。
+脚本解包 tarball，在无关 cwd 经包的 `apply` 注册六工具，使用默认真实 runner、官方 CLI/daemon 和指定兼容扩展及本地无敏感页面；不安装到 profile。核实官方 CLI/daemon 0.4.1、协议 1.8、扩展应用 0.4.1-dsh.1/数字 manifest 0.4.1.1 及对应 build/source/hash；配套缺失或目标离线如实阻塞。后台场景须在不置顶、目标非 active 的自有标签实际完成；request-help 恢复前台后成功不能代替。每组结果保留版本、实例、调用、输出和清理证据；unknown 后在允许范围内重新同步、只读核对再停止，不重放动作。
 
-## 安装与生效边界
+注册上下文、模型元数据和附件接口使用宿主 fixture。真实 PNG 字节及 renderer image block 的检查不能证明真实 Desktop GUI 或附件授权服务已验收。文件上传可能需要扩展的文件网址权限，incognito 需要单独许可；缺权限时保留官方错误，由用户决定后补测。
 
-正式 desktop 安装与在用 profile 重启必须等验收结果被接受后，再取得对应明确授权。本文不代表授权，也未执行安装、重启或 npm 发布。安装应使用已验证候选 tgz 的绝对路径，核对 profile 依赖及 bundle 指向，随后按宿主要求重载；重新加载 skill 后确认六工具是当前候选，再验证 UI 和附件。
+## 安装、升级与成套回退
 
-已获授权后的正式安装命令模板：
+在用 profile 的安装、重启及配套组件升级分别按明确授权执行。先准备已验证候选、哈希、原配置和恢复包；确认没有未完成的浏览器任务。按官方方式使 CLI、运行中的 daemon、两端扩展先后到达配套版本，再安装候选并重载相同 profile，重新调用 skill，核对当前六工具与实际协议。仅刷新网页不能证明宿主已加载新包。
+
+已获对应授权后的安装命令模板：
 
 ```sh
-dsh plugin --profile desktop add <absolute-path-to-candidate.tgz>
+dsh plugin --profile desktop add <absolute-path-to-verified-candidate.tgz>
 ```
 
-退出并重新启动同一 desktop profile 的具体方式按实际宿主记录；不能假定 Web 刷新已加载新插件，也不能以旧 desktop 工具或直接 CLI 结果代替候选插件实测。隔离开发 profile 的装载也必须遵守相应授权边界。
+移除本轮兼容扩展并恢复官方扩展 0.4.1，可恢复官方基底行为与其已知后台限制，CLI/daemon 不需更换；这不等于后台验收通过。旧公开增强包 `0.3.3-dsh.3` 配套官方 0.3.3；若回退到该包，须成套恢复插件、CLI、daemon 和扩展，而非只回退一个组件。若改用官方 0.4.1 DSH 插件，先按宿主支持方式停用增强包，避免两个插件同时注册；此时七类增强不再保证保留。保留旧版本与新候选，不改写历史 tag，不手改已安装 node_modules。
 
-## 更新与回退
-
-采用 manual 更新：核对官方新稳定 tag 是否已吸收增强，在长期增强分支合入稳定 tag 并保留仍需要的小补丁，按新的官方组件版本重跑包检查与 Chrome/Edge 冒烟，再提高发行版本并重新打包。增强版使用 `@caiqy/browser-skill-dsh-plugin`，不维护自定义 CLI/扩展发行版。
-
-通过索引中的精确版本或 npm `dsh` 标签升级增强版。官方包与增强包不能同时启用；如需回退，先卸载增强包，再安装官方 `0.3.3`，对应授权后执行：
-
-```sh
-dsh plugin --profile desktop remove @caiqy/browser-skill-dsh-plugin
-dsh plugin --profile desktop add @wxg-prc-cpg/browser-skill-dsh-plugin@0.3.3
-```
-
-核对依赖恢复为官方版本，按宿主要求重载并重新加载 skill；CLI/daemon/扩展保持匹配官方能力。只替换插件并不自动更新其他组件。保留源码补丁和候选 tgz 便于重装；不手改已安装 node_modules。Git 提交、push、merge、发布及重启分别受各自授权约束。
-
-## 当前验证记录与待补证据
-
-2026-10-19 使用 Node v22.23.1 / pnpm 10.17.0。以下为 Build 的实际证据；正式 typecheck/test/build、publint、包检查和独立验收由 Comet Runtime 在冻结候选后执行，最终结论以该 change 的 verification 记录为准：
-
-| 证据 | 当前边界 / 待填内容 |
-| --- | --- |
-| 技能定向检查 | `build:skill` 通过；`vitest run tests/skill.test.ts` 5/5；`node scripts/check-skill-bundles.mjs` 通过，DSH 入口 4109 UTF-8 bytes、7 个资源；`node --test scripts/check-skill-bundles.test.mjs` 6/6，含 LF/CRLF 与路由/预算契约 |
-| 最终源码与 tgz | 源码在上述补丁分支；交付 manifest 记录最终提交。候选位于父 workspace `artifacts/browserskill-dsh-enhancement/wxg-prc-cpg-browser-skill-dsh-plugin-0.3.3-dsh.1.tgz`，SHA256 `81d7eec2d2315b0e95d5170d5a09e4c45d2269ed17c8f702485ecc71028e40b9` |
-| 开发期源码检查 | tsc --noEmit 通过；runner/tools 定向测试 157/157；此前 enhancement 定向 41/41，含 FIFO、取消、实际 argv 和独占文件保护。build 通过并从生成物打包。正式完整计划交由 Runtime 执行，不把这些记录当独立验收 |
-| 组件版本 | 2026-10-19 已核实官方 CLI / daemon / Chrome 与 Edge 扩展均为 0.3.3；浏览器均为 155.0.0.0、协议 1.3、无版本偏差。Chrome 实例 2303ebf6（chrome）；Edge 实例 daae7a27（edge-gmail3）。以各次报告记录的实际连接状态为准 |
-| Chrome 实测 | 同一候选 SHA256；父 workspace 的 `artifacts/browserskill-dsh-enhancement/live-phase-4-chrome/report.json` 记录 JS、缺失文件错误、下载、整页 current/follow、HTML、模拟、悬停通过；首次上传因缺少扩展文件网址权限失败，用户开启后 `live-phase-5-chrome-upload/report.json` 单/多文件 input 与 drop 三项全部通过并逐字核对内容。会话停止、自有列表为空，969×2296 PNG 在 stop 后保留；HTML 4830 UTF-8 bytes |
-| Edge 实测 | 原实例 daae7a27 恢复后，`artifacts/browserskill-dsh-enhancement/live-phase-6-edge/report.json` 的 10/10 特性通过，failures 为空；961×2296 PNG、HTML 4831 UTF-8 bytes，hcss 会话 stop/list 为空且截图保留。两端均覆盖 Promise/false/throw/真实超时/取消、wait-ms/命名；附件与宿主 fixture 边界见上文，不宣称 desktop GUI 已验收 |
-| 正式 desktop | 未安装增强包，未重启；待验收接受后的明确授权，不与隔离环境结果混淆 |
-
-真实冒烟使用无敏感本地页面和数据。失败、取消、阻塞、未运行分别如实记录；mock、技能测试和 fake runner 均不能证明扩展/daemon/宿主真实兼容。独立验收结论及用户接受结果由主工作流管理。
+本次开发、正式检查、两浏览器及实际 Desktop 验证分别报告。旧 2026-10-19 的 0.3.3 报告仅为历史；当前候选未运行、失败、取消或阻塞的项目不得计为通过。Comet 独立验收及用户结果接受由主工作流记录，npm 发布、远端 CI、push、PR 不由本文授权。

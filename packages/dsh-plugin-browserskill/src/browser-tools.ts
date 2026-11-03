@@ -9,14 +9,24 @@ import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deep
 import { DEBUG_PARAMETERS } from "./debug-tool";
 import { disposeAll } from "./disposables";
 import { EXTRACT_PARAMETERS } from "./extract-tool";
+import {
+  DRAG_PARAMETERS,
+  SAVED_OBSERVATION_PARAMETERS,
+  STEP_PARAMETERS,
+  VIEW_PARAMETERS,
+} from "./gesture-observation-tools";
 import toolNames from "./tool-names.json";
 import {
   BROWSER_PARAM,
+  CONTROL_POLICY_PARAM,
   ELEMENT_WAIT_PARAMS,
+  EXPECT_PARAM,
+  OBSERVATION_ID_PARAM,
   SESSION_PARAM,
   SESSION_STOP_PARAMS,
   TAB_ID_PARAM,
   TIMEOUT_MS_PARAM,
+  validateExpectations,
   WAIT_UNTIL_PARAM,
 } from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
@@ -89,6 +99,19 @@ function defineBrowserTool(
           "Operation to perform. Other arguments are action-dependent and are validated by that operation.",
       },
       ...spec.parameters,
+      dependsOn: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Strict policy only: observed refs/selectors covering the decision regions. Under target policy, declare exact business conditions with expect instead.",
+      },
+      contextId: {
+        type: "string",
+        description:
+          "Control context_id actually received from sync or a step's post result. Under target policy it survives supplementary reads and DOM actions until human intervention or document replacement. Strict policy consumes it after one action.",
+      },
+      observationId: OBSERVATION_ID_PARAM,
+      expect: EXPECT_PARAM,
     },
     output: {
       schema: DOMAIN_RESULT,
@@ -103,7 +126,26 @@ function defineBrowserTool(
     },
     async execute(args, exec) {
       const definition = definitionFor(definitions, spec.actions, args.action);
-      return (await definition.execute(operationArgs(args), exec)) as never;
+      validateExpectations(args.expect);
+      return (await definition.execute(operationArgs(args), {
+        ...exec,
+        observationContext: args.contextId,
+        observationDependencies: args.dependsOn,
+        observationId: definition.name === "interact.drag" ? undefined : args.observationId,
+        actionExpectations: args.expect,
+      } as typeof exec)) as never;
+    },
+    finalizeContent(exec, result) {
+      // The host also finalizes calls rejected before argument validation.
+      const args = exec.arguments;
+      if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+      const action = (args as Record<string, unknown>).action;
+      if (typeof action !== "string") return undefined;
+      const operation = spec.actions[action];
+      if (typeof operation !== "string") return undefined;
+      return definitions
+        .get(operation)
+        ?.finalizeContent?.({ ...exec, arguments: operationArgs(args) }, result);
     },
     presentCall(args) {
       const definition = definitionFor(definitions, spec.actions, args.action);
@@ -120,11 +162,17 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: toolNames.session,
     description:
-      "Manage plugin-owned browser sessions. Actions: start opens an Agent Window; stop closes an " +
-      "owned session; list returns owned sessions; browsers lists connected browser instances. For start, name/url/device/width/height/noFocus are " +
+      "Manage plugin-owned browser sessions. Human collaboration is automatic; share is an optional compatibility alias for sync/rebinding. " +
+      "sync returns current state and context_id; wait-user waits for hand-back; cooperation-status reads ownership. " +
+      "sync can saveFull to a new JSON file for offline bsk_inspect view; matchText only folds plain numbered fallback buttons, not general text. " +
+      "Target policy lets DOM actions reuse contextId across supplementary reads; pass expect for business facts that must remain true. Human intervention or document replacement requires sync. Untargeted actions also require observationId. " +
+      "Actions: start opens an Agent Window; stop closes an " +
+      "owned session; list returns owned sessions; browsers lists connected instances. For start, name/url/device/width/height/noFocus/incognito are " +
       "optional. When a specific profile is required, always set browser to its verified instance " +
       "ID or unique label, even with one connected browser; stop if the target is unknown or " +
-      "unavailable instead of omitting or changing browser. For stop, specify session or requestId " +
+      "unavailable instead of omitting or changing browser. Set incognito to open an Agent " +
+      "Window isolated from the profile's ordinary browsing state (requires Allow in incognito; " +
+      "incognito sessions cannot borrow tabs). For stop, specify session or requestId " +
       "(not both), or omit both to retry an " +
       "unacknowledged stop before selecting the current owned session. If several stops await " +
       "acknowledgement, specify a target. Once accepted, cleanup continues if the call is aborted.",
@@ -133,10 +181,24 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       stop: "session.stop",
       list: "session.list",
       browsers: "session.browsers",
+      share: "session.cooperate.enable",
+      sync: "session.cooperate.sync",
+      "wait-user": "session.cooperate.wait",
+      "cooperation-status": "session.cooperate.status",
     },
     parameters: {
       ...SESSION_STOP_PARAMS,
       name: { type: "string", description: "Optional task name for start." },
+      tabId: TAB_ID_PARAM,
+      timeoutMs: TIMEOUT_MS_PARAM,
+      policy: CONTROL_POLICY_PARAM,
+      ...SAVED_OBSERVATION_PARAMETERS,
+      settle: {
+        type: "boolean",
+        description:
+          "Sync: bounded read-only recovery from transient refusals; never repeats an action.",
+      },
+      maxTokens: { type: "integer", description: "Sync observation token cap." },
       url: { type: "string", description: "Initial URL for start." },
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
@@ -144,6 +206,12 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
         type: "boolean",
         description:
           "Background by default. Set false to explicitly open the Agent Window in front.",
+      },
+      incognito: {
+        type: "boolean",
+        description:
+          "Open an incognito Agent Window (requires Allow in incognito). Incognito sessions " +
+          "cannot borrow tabs and are isolated from the profile's ordinary browsing state.",
       },
       browser: BROWSER_PARAM,
       device: { type: "string", enum: DEVICE_PRESETS, description: "Device preset for start." },
@@ -184,7 +252,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.inspect,
     description:
       "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
-      "screenshot, console, network, video, extract. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. " +
+      "screenshot, console, network, video, extract, view. view reads a saved sync/step file offline, with find for literal text search; historical refs/context never authorize a live action. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. " +
       "extract reads loaded table/list rows with columns and sources, without scrolling or paging: discover first, then pass extractTarget; " +
       "check coverage and warnings before calling the data complete. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
@@ -200,6 +268,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       debug: "inspect.debug",
       video: "inspect.video",
       extract: "inspect.extract",
+      view: "inspect.view",
     },
     parameters: {
       session: SESSION_PARAM,
@@ -207,6 +276,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ...debugParameters,
       ...videoParameters,
       ...extractParameters,
+      ...VIEW_PARAMETERS,
       output: INSPECT_OUTPUT,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
@@ -248,13 +318,16 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: toolNames.interact,
     description:
-      "Interact with the active Agent Window tab. Actions: click, hover, wheel, scroll-to, focus, blur, fill, select, " +
-      "press, evaluate, upload, download. evaluate requires expression and can change the page; upload requires target and nonempty files; download requires target/output and defaults to no overwrite. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
+      "Interact with the active Agent Window tab. Actions: click, hover, wheel, drag, step, scroll-to, focus, blur, fill, select, " +
+      "drag requires target plus to or a nonzero deltaX/deltaY. step runs one stepAction using params JSON, then optional untilVisible readiness and read-only sync; inspect ok/action/readiness/post before deciding what to do next and never blindly replay an action. " +
+      "press, evaluate, upload, download. evaluate requires expression; upload requires target/files; download requires target/output. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
       "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
       click: "interact.click",
       hover: "interact.hover",
       wheel: "interact.wheel",
+      drag: "interact.drag",
+      step: "interact.step",
       "scroll-to": "interact.scroll-to",
       focus: "interact.focus",
       blur: "interact.blur",
@@ -268,8 +341,14 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     parameters: {
       session: SESSION_PARAM,
       tabId: TAB_ID_PARAM,
+      ...DRAG_PARAMETERS,
+      ...STEP_PARAMETERS,
       target: TARGET_PARAM,
-      button: { type: "string", enum: ["left", "middle", "right"], description: "Click button." },
+      button: {
+        type: "string",
+        enum: ["left", "middle", "right"],
+        description: "Click or drag mouse button.",
+      },
       clickCount: { type: "integer", description: "Click count; Canvas accepts 1 or 2." },
       captureId: { type: "string", description: "Single-use Canvas screenshot capture for click." },
       imageX: {
@@ -285,49 +364,38 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       modifiers: {
         type: "array",
         items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
-        description: "Modifiers held during hover or wheel input.",
+        description: "Modifiers held during hover, wheel, or drag input.",
       },
       settleMs: { type: "integer", description: "Hover settle delay." },
       deltaX: {
         type: "number",
-        description: "Horizontal wheel input in CSS pixels; defaults to 0.",
+        description: "Horizontal wheel input or drag displacement in CSS pixels; defaults to 0.",
       },
-      deltaY: { type: "number", description: "Vertical wheel input in CSS pixels; defaults to 0." },
+      deltaY: {
+        type: "number",
+        description: "Vertical wheel input or drag displacement in CSS pixels; defaults to 0.",
+      },
       timeoutMs: TIMEOUT_MS_PARAM,
       values: {
         type: "array",
         items: { type: "string" },
         description: "Option values for select; at least one is required.",
       },
-      key: { type: "string", description: "Key or combo for press." },
-      holdMs: { type: "integer", description: "Key hold duration for press." },
-      expression: {
-        type: "string",
-        description: "evaluate: JavaScript expression; use an IIFE for statements.",
-      },
-      awaitPromise: {
-        type: "boolean",
-        description: "evaluate: await Promise resolution (default true).",
-      },
-      returnByValue: {
-        type: "boolean",
-        description: "evaluate: return a serialized value (default true).",
-      },
+      expression: { type: "string", description: "JavaScript expression for evaluate." },
+      awaitPromise: { type: "boolean", description: "Evaluate: await promises, default true." },
+      returnByValue: { type: "boolean", description: "Evaluate: return JSON, default true." },
       files: {
         type: "array",
         items: { type: "string" },
-        description: "upload: nonempty list of local files on this host.",
+        description: "Upload: one to twenty local file paths.",
       },
-      mode: {
-        type: "string",
-        enum: ["input", "drop"],
-        description: "upload: file input/chooser or drop target (default input).",
-      },
-      output: { type: "string", description: "download: destination file on this host." },
-      overwrite: {
-        type: "boolean",
-        description:
-          "download: replace an existing file only when explicitly authorized (default false).",
+      mode: { type: "string", enum: ["input", "drop"], description: "Upload mechanism." },
+      output: { type: "string", description: "Download destination file." },
+      overwrite: { type: "boolean", description: "Allow replacing the download destination." },
+      key: { type: "string", description: "Key or combo for press." },
+      holdMs: {
+        type: "integer",
+        description: "Key hold for press or initial mouse hold for drag, in milliseconds.",
       },
     },
   },
@@ -361,16 +429,39 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: toolNames.assist,
     description:
-      "Display and human-assistance operations. Actions: resize, emulate, request-help. resize " +
+      "Display and human-assistance operations. Actions: resize, emulate, request-help, dialog-status, dialog-accept, dialog-dismiss, operation-await, operation-cancel. Native JS dialogs require YOUR decision; use dialogId and optional text, then operation-await with the original operationId. Never repeat its action. resize " +
       "requires width/height; emulate accepts a device preset, viewport and/or UA/language/touch overrides, or off alone; " +
       "request-help requires prompt and can wait for explicit completion criteria.",
     actions: {
       resize: "assist.resize",
       emulate: "assist.emulate",
       "request-help": "assist.request-help",
+      "dialog-status": "assist.dialog-status",
+      "dialog-accept": "assist.dialog-accept",
+      "dialog-dismiss": "assist.dialog-dismiss",
+      "operation-await": "assist.operation-await",
+      "operation-cancel": "assist.operation-cancel",
     },
     parameters: {
       session: SESSION_PARAM,
+      dialogId: { type: "string", description: "Pending native dialog id for accept/dismiss." },
+      operationId: {
+        type: "string",
+        description: "Original suspended operation id for await/cancel.",
+      },
+      text: {
+        type: "string",
+        description: "Exact prompt input for dialog-accept; empty string is valid.",
+      },
+      waitMs: { type: "integer", description: "operation-await wait, 0..60000 ms." },
+      output: {
+        type: "string",
+        description: "operation-await: save a retained download to this local path.",
+      },
+      overwrite: {
+        type: "boolean",
+        description: "Allow replacing operation-await's download destination.",
+      },
       tabId: TAB_ID_PARAM,
       width: { type: "integer", description: "Window/viewport width." },
       height: { type: "integer", description: "Window/viewport height." },

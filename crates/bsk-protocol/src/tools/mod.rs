@@ -1,8 +1,10 @@
 //! Typed params/results for the `tool.*` RPC methods (§7).
 
 pub mod console;
+pub mod cooperate;
 pub mod debug;
 pub mod dialog;
+pub mod drag;
 pub mod emulate;
 pub mod extract;
 pub mod file_transfer;
@@ -25,8 +27,10 @@ pub mod wheel;
 pub mod window;
 
 pub use console::*;
+pub use cooperate::*;
 pub use debug::*;
 pub use dialog::*;
+pub use drag::*;
 pub use emulate::*;
 pub use extract::*;
 pub use file_transfer::*;

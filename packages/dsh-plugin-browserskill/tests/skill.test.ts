@@ -47,12 +47,12 @@ describe("registerBskSkill", () => {
     expect(content).not.toMatch(/--[a-z]/);
     expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
-    expect(content).toContain("Refs invalidate after navigation");
-    expect(content).toContain("Page-script `evaluate` is supported");
-    expect(content).toContain("Interaction recording remains unsupported");
-    // Match the build's UTF-8 budget, including source frontmatter; the lower
-    // bound catches accidental truncation of the injected guidance.
-    expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(3_000);
+    expect(content).toContain("DOM refs survive reads; navigation invalidates them");
+    expect(content).toContain("Interaction recording is not exposed");
+    // Keep the lazily injected instructions inside a bounded prompt budget,
+    // while the lower bound catches accidental truncation of the guidance.
+    expect(content.length).toBeGreaterThan(3_000);
+    expect(content.length).toBeLessThan(4_500);
     const base = skill.resourceBase as { kind: string; path: string };
     expect(base.kind).toBe("directory");
     expect(isAbsolute(base.path)).toBe(true);
@@ -61,9 +61,11 @@ describe("registerBskSkill", () => {
     ).toBeLessThanOrEqual(4_500);
     const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].sort()).toEqual([
+      "references/cooperation.md",
       "references/debugging.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",
+      "references/native-dialogs.md",
       "references/screenshots-and-canvas.md",
       "references/tabs-and-profiles.md",
       "references/video.md",
@@ -75,6 +77,11 @@ describe("registerBskSkill", () => {
     }
     expect(readFileSync(join(base.path, "references/tabs-and-profiles.md"), "utf8")).toContain(
       'bsk_session({ action: "start", browser: "<verified-instance-id>" })',
+    );
+    const interactions = readFileSync(join(base.path, "references/interaction-details.md"), "utf8");
+    expect(interactions).toContain("endpoint drags with `to` need only `contextId`");
+    expect(interactions).toContain(
+      "drags with `deltaX`/`deltaY` also require sync's single-use `observationId` receipt",
     );
     expect(content).toMatch(/Never omit\s+`browser` or substitute another instance/);
     expect(content).toContain("[visual:screenshot]");
