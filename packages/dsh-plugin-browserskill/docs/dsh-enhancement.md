@@ -67,9 +67,10 @@ npm pack ./packages/dsh-plugin-browserskill --ignore-scripts --pack-destination 
 从 BrowserSkill workspace 运行，结果目录须为本次新目录，实例参数须当次核实：
 
 ```sh
-node packages/dsh-plugin-browserskill/scripts/test-enhancement-live.mjs <absolute-candidate.tgz> <new-absolute-results-dir> <verified-chrome-id> <verified-edge-id>
-# 可追加 chrome 或 edge，再追加逗号分隔的 feature 名。
+node packages/dsh-plugin-browserskill/scripts/test-enhancement-live.mjs <absolute-candidate.tgz> <new-absolute-results-dir> <verified-chrome-id> <verified-edge-id> <chrome-or-edge> <comma-separated-features>
 ```
+
+常规功能与 `screenshot`、`screenshotBackground` 分组运行，避免截图未知结果阻塞余下用例。Edge 的 `uploadSingle`、`uploadMultiple`、`uploadDrop` 各用一次新调用和新结果目录；不要一次请求多个 Edge 上传模式。实际完整参数保存在各次报告的 `requestedBrowsers/requestedFeatures` 中。
 
 脚本在无关 cwd 经 tarball 的 `apply` 注册六工具，使用真实 runner、官方 CLI/daemon/扩展 0.4.1、协议 1.8 和本地无敏感页面，不安装到 profile。记录实际插件 hash、版本、实例、调用、输出及清理。后台截图单独验证并保留非前台/非 active 证据；官方后台拒绝与 Edge 上传不确定结果按上述已接受限制报告。清理失败、参数回归、其他错误不能归入该限制。
 

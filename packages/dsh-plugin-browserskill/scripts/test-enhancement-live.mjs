@@ -1,4 +1,4 @@
-// Opt-in smoke: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all] <extension-proof.json>
+// Opt-in smoke: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all]
 // Browser actions use only the packed plugin's six public tools and its real shared runner.
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -7,18 +7,16 @@ import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const EXPECTED_PLUGIN_SHA256 = "746a44878c2b42635d39fcf2ce443aa459f44d4ac470e773fff339f53483580c";
-const EXPECTED_PLUGIN_BYTES = 140958;
-const EXPECTED_EXTENSION_VERSION = "0.4.1-dsh.1";
-const EXPECTED_MANIFEST_VERSION = "0.4.1.1";
-const [archiveArg, resultsArg, chrome, edge, only, featureArg, proofArg] = process.argv.slice(2);
+const OFFICIAL_COMPONENT_VERSION = "0.4.1";
+const OFFICIAL_PROTOCOL_VERSION = "1.8";
+const [archiveArg, resultsArg, chrome, edge, only, featureArg] = process.argv.slice(2);
 const requestedFeatures = !featureArg || featureArg === "all" ? undefined : featureArg.split(",");
-const knownFeatures = ["wait", "control", "evaluate", "evaluateCancel", "evaluateTimeout", "uploadSingle", "uploadMultiple", "uploadDrop", "missingUpload", "download", "screenshot", "html", "emulate", "hover", "drag", "step", "view", "incognito", "dialog", "background"];
+const knownFeatures = ["wait", "control", "evaluate", "evaluateCancel", "evaluateTimeout", "uploadSingle", "uploadMultiple", "uploadDrop", "missingUpload", "download", "screenshot", "html", "emulate", "hover", "drag", "step", "view", "incognito", "dialog", "screenshotBackground"];
 assert(!requestedFeatures || requestedFeatures.every((feature) => knownFeatures.includes(feature)), "Unknown feature filter");
-assert(archiveArg && resultsArg && chrome && edge && proofArg, "Usage: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all] <extension-proof.json>");
+assert(archiveArg && resultsArg && chrome && edge, "Usage: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all]");
 assert(only === undefined || only === "chrome" || only === "edge", "Optional browser filter must be chrome or edge");
 const requestedBrowsers = [["chrome", chrome], ["edge", edge]].filter(([label]) => only === undefined || label === only);
 if (requestedBrowsers.some(([label]) => label === "edge")) {
@@ -27,46 +25,17 @@ if (requestedBrowsers.some(([label]) => label === "edge")) {
 }
 const archive = resolve(archiveArg);
 const results = resolve(resultsArg);
-const extensionProofPath = resolve(proofArg);
-const extensionProof = JSON.parse(await readFile(extensionProofPath, "utf8"));
 const archiveBytes = (await stat(archive)).size;
 const archiveHash = createHash("sha256").update(await readFile(archive)).digest("hex");
-assert.equal(archiveBytes, EXPECTED_PLUGIN_BYTES, "Candidate plugin tgz byte size mismatch");
-assert.equal(archiveHash, EXPECTED_PLUGIN_SHA256, "Candidate plugin tgz SHA-256 mismatch");
-assert.match(extensionProof.pluginSha256 ?? "", /^[a-f0-9]{64}$/i, "Extension proof pluginSha256 is required");
-assert.equal(extensionProof.pluginSha256.toLowerCase(), archiveHash, "Extension proof must bind the exact candidate plugin tgz");
-assert.equal(extensionProof.applicationVersion, EXPECTED_EXTENSION_VERSION, "Extension proof application version mismatch");
-assert.equal(extensionProof.manifestVersion, EXPECTED_MANIFEST_VERSION, "Extension manifest version mismatch");
-assert.match(extensionProof.versionName ?? "", /0\.4\.1-dsh\.1/i, "Extension version_name must identify the candidate");
-assert.match(extensionProof.versionName ?? "", /compat/i, "Extension version_name must identify this as a compatibility build");
-assert(typeof extensionProof.buildId === "string" && extensionProof.buildId.length > 0, "Extension buildId is required");
-assert(typeof extensionProof.sourceRevision === "string" && extensionProof.sourceRevision.length > 0, "Extension sourceRevision is required");
-assert(typeof extensionProof.zipPath === "string" && extensionProof.zipPath.length > 0, "Extension ZIP path is required");
-assert.match(extensionProof.zipSha256 ?? "", /^[a-f0-9]{64}$/i, "Extension ZIP SHA-256 is required");
-const extensionZipPath = resolve(dirname(extensionProofPath), extensionProof.zipPath);
-assert((extensionProof.sourceDiffSha256 === undefined) === (extensionProof.dirtyPatchPath === undefined), "sourceDiffSha256 and dirtyPatchPath must be supplied together");
-if (extensionProof.sourceDiffSha256 !== undefined) assert.match(extensionProof.sourceDiffSha256, /^[a-f0-9]{64}$/i, "Extension sourceDiffSha256 must be SHA-256");
-if (extensionProof.dirtyPatchPath !== undefined) {
-  const dirtyPatchPath = resolve(dirname(extensionProofPath), extensionProof.dirtyPatchPath);
-  const actualDiffSha256 = createHash("sha256").update(await readFile(dirtyPatchPath)).digest("hex");
-  assert.equal(actualDiffSha256, extensionProof.sourceDiffSha256.toLowerCase(), "Extension dirty source diff SHA-256 mismatch");
-}
-const extensionZipSha256 = createHash("sha256").update(await readFile(extensionZipPath)).digest("hex");
-assert.equal(extensionZipSha256, extensionProof.zipSha256.toLowerCase(), "Extension ZIP SHA-256 mismatch");
-const manifestPaths = execFileSync("tar", ["-tf", extensionZipPath], { encoding: "utf8", timeout: 15000 }).split(/\r?\n/).filter((path) => /(?:^|\/)manifest\.json$/i.test(path));
-assert.equal(manifestPaths.length, 1, "Extension ZIP must contain exactly one manifest.json");
-const extensionManifest = JSON.parse(execFileSync("tar", ["-xOf", extensionZipPath, manifestPaths[0]], { encoding: "utf8", timeout: 15000 }));
-assert.equal(extensionManifest.version, EXPECTED_MANIFEST_VERSION, "Loaded candidate ZIP manifest version mismatch");
-assert.equal(extensionManifest.version_name, extensionProof.versionName, "Extension proof version_name does not match ZIP manifest");
 await mkdir(results, { recursive: true });
 const scratch = await mkdtemp(join(tmpdir(), "bsk-candidate-live-"));
 const originalCwd = process.cwd();
 const disposers = [];
 const tools = new Map();
 const targetTabBySession = new Map();
-const report = { candidate: archive, bytes: archiveBytes, sha256: archiveHash, extensionProof: { path: extensionProofPath, applicationVersion: extensionProof.applicationVersion, manifestVersion: extensionProof.manifestVersion, versionName: extensionProof.versionName, buildId: extensionProof.buildId, sourceRevision: extensionProof.sourceRevision, sourceDiffSha256: extensionProof.sourceDiffSha256, dirtyPatchPath: extensionProof.dirtyPatchPath, zipPath: extensionZipPath, zipSha256: extensionZipSha256 }, startedAt: new Date().toISOString(), calls: [], browsers: [], failures: [], cleanup: [] };
+const report = { candidate: archive, bytes: archiveBytes, sha256: archiveHash, startedAt: new Date().toISOString(), calls: [], browsers: [], failures: [], limitations: [], cleanup: [] };
 report.fixtureBoundary = "Packed apply and all six public tools use the unmodified real runner/CLI/daemon/extensions. Context registration, image-capable model metadata and the durable local attachment store are host fixtures; no desktop GUI or actual DSH attachment service is claimed.";
-report.extensionProofBoundary = "The supplied GE ZIP and manifest are hash-verified; browser metadata verifies the live handshake app version/protocol/skew. Exact loaded-ZIP association requires parent confirmation before run; this script never installs or reloads extensions.";
+report.componentRequirement = { cli: OFFICIAL_COMPONENT_VERSION, daemon: OFFICIAL_COMPONENT_VERSION, extension: OFFICIAL_COMPONENT_VERSION, protocol: OFFICIAL_PROTOCOL_VERSION, customizedComponentsAllowed: false };
 const downloadContent = "BrowserSkill 下载测试\n";
 const fixtureWindowMarker = `bsk-fixture-${randomUUID()}`;
 const page = `<!doctype html><html lang="en"><meta charset="utf-8"><title>BrowserSkill candidate smoke ${fixtureWindowMarker}</title>
@@ -95,11 +64,15 @@ const exec = (signal = new AbortController().signal) => ({
   callId: `live-${++sequence}`, name: "candidate-live", signal,
   agent: { id: "bsk-candidate-live", options: { provider: "local-fixture", model: "image-capable" }, session: { requestHeader: () => ({ config: { provider: "local-fixture", model: "image-capable" } }) } },
 });
+const isPrivateReportField = (key) =>
+  ["url", "title", "expression", "html", "text", "contents"].includes(key.toLowerCase()) ||
+  /(?:tab|window|request|frame|document|attachment).*id$/i.test(key);
 const sanitizeReportValue = (value, key = "") => {
-  if (key === "url" || key === "title") return undefined;
+  if (isPrivateReportField(key)) return undefined;
+  if (key === "files" && Array.isArray(value)) return value.map((file) => basename(String(file)));
   if (typeof value === "string") return value.replace(/https?:\/\/127\.0\.0\.1:\d+(?:\/[^\s"')}]*)?/g, "<fixture-url>");
   if (Array.isArray(value)) return value.map((item) => sanitizeReportValue(item));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([field]) => field !== "url" && field !== "title").map(([field, item]) => [field, sanitizeReportValue(item, field)]));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([field]) => !isPrivateReportField(field)).map(([field, item]) => [field, sanitizeReportValue(item, field)]));
   return value;
 };
 const errorRecord = (error) => ({
@@ -108,6 +81,30 @@ const errorRecord = (error) => ({
   data: sanitizeReportValue(error?.data),
   timedOut: error?.timedOut,
 });
+const isEdgeUploadLimitation = (browserId, edgeId, feature, error) =>
+  browserId === edgeId && ["uploadSingle", "uploadMultiple", "uploadDrop"].includes(feature) &&
+  error?.code === "permission_denied" && error.data?.phase === "control" &&
+  error.data?.reason === "control_context_invalid" && error.data?.effect_state === "unknown";
+const isBackgroundCaptureInterruption = (feature, error, evidence) =>
+  ["screenshot", "screenshotBackground"].includes(feature) && error?.code === "cdp_failed" &&
+  ["page_hidden", "navigation"].includes(error.data?.reason) && evidence?.foregroundBefore?.available === true &&
+  evidence.foregroundBefore.agentWindowFound === true && evidence.foregroundBefore.foregroundIsAgentWindow === false &&
+  evidence.foregroundAfter?.available === true && evidence.foregroundAfter.agentWindowFound === true &&
+  evidence.foregroundAfter.foregroundIsAgentWindow === false;
+assert(isEdgeUploadLimitation("edge-id", "edge-id", "uploadSingle", { code: "permission_denied", data: { phase: "control", reason: "control_context_invalid", effect_state: "unknown" } }));
+assert(!isEdgeUploadLimitation("chrome-id", "edge-id", "uploadSingle", { code: "permission_denied", data: { phase: "control", reason: "control_context_invalid", effect_state: "unknown" } }));
+assert(!isEdgeUploadLimitation("edge-id", "edge-id", "uploadSingle", { code: "permission_denied", data: { phase: "input", reason: "control_context_invalid", effect_state: "unknown" } }));
+assert(!isEdgeUploadLimitation("edge-id", "edge-id", "download", { code: "permission_denied", data: { phase: "control", reason: "control_context_invalid", effect_state: "unknown" } }));
+const backgroundForegroundEvidence = { foregroundBefore: { available: true, agentWindowFound: true, foregroundIsAgentWindow: false }, foregroundAfter: { available: true, agentWindowFound: true, foregroundIsAgentWindow: false } };
+assert(isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, backgroundForegroundEvidence));
+assert(isBackgroundCaptureInterruption("screenshotBackground", { code: "cdp_failed", data: { reason: "navigation" } }, backgroundForegroundEvidence));
+assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, { ...backgroundForegroundEvidence, foregroundAfter: { available: true, agentWindowFound: true, foregroundIsAgentWindow: true } }));
+assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "watchdog_timeout" } }, backgroundForegroundEvidence));
+const classifyOutcome = ({ failures, blocked, allRequestedResolved, limitations, allRequestedPassed }) =>
+  failures > 0 ? "failed" : blocked > 0 ? "blocked" : !allRequestedResolved ? "incomplete" : limitations > 0 ? "accepted-limitations" : allRequestedPassed ? "passed" : "incomplete";
+assert.equal(classifyOutcome({ failures: 0, blocked: 1, allRequestedResolved: false, limitations: 1, allRequestedPassed: false }), "blocked");
+assert.equal(classifyOutcome({ failures: 0, blocked: 0, allRequestedResolved: false, limitations: 1, allRequestedPassed: false }), "incomplete");
+assert.equal(classifyOutcome({ failures: 0, blocked: 0, allRequestedResolved: true, limitations: 1, allRequestedPassed: false }), "accepted-limitations");
 const foregroundProbeScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $native = @"
@@ -291,8 +288,8 @@ try {
       const mismatches = [];
       if (entry.instance_id !== browser) mismatches.push(`instance_id=${entry.instance_id ?? "missing"}, required ${browser}`);
       if (entry.browser_name !== label) mismatches.push(`browser_name=${entry.browser_name ?? "missing"}, required ${label}`);
-      if (entry.extension_version !== extensionProof.applicationVersion) mismatches.push(`extension_version=${entry.extension_version ?? "missing"}, required ${extensionProof.applicationVersion}`);
-      if (entry.extension_protocol_version !== "1.8") mismatches.push(`extension_protocol_version=${entry.extension_protocol_version ?? "missing"}, required 1.8`);
+      if (entry.extension_version !== OFFICIAL_COMPONENT_VERSION) mismatches.push(`extension_version=${entry.extension_version ?? "missing"}, required official ${OFFICIAL_COMPONENT_VERSION}; customized extensions are not allowed`);
+      if (entry.extension_protocol_version !== OFFICIAL_PROTOCOL_VERSION) mismatches.push(`extension_protocol_version=${entry.extension_protocol_version ?? "missing"}, required ${OFFICIAL_PROTOCOL_VERSION}`);
       if (entry.unresponsive !== false) mismatches.push(`unresponsive=${entry.unresponsive ?? "missing"}, required false`);
       if (entry.version_skew !== false) mismatches.push(`version_skew=${entry.version_skew ?? "missing"}, required false`);
       if (mismatches.length) {
@@ -310,22 +307,14 @@ try {
       run.startNoFocus = true;
       assert.equal(start.browserInstanceId, browser);
       assert.match(tools.get("bsk_session").presentCall(args).title, /bsk-candidate-/);
-      const initialTabs = await call("bsk_tabs", { action: "list", session, scope: "agent" });
-      assert(initialTabs.tabs.length > 0 && initialTabs.tabs.every((tab) => tab.scope === "agent"));
-      const targetTabId = initialTabs.tabs[0].tabId;
-      targetTabBySession.set(session, targetTabId);
-      const sibling = await call("bsk_tabs", { action: "create", session, url: `${url}?sibling=${randomUUID()}`, active: true });
       const tabs = await call("bsk_tabs", { action: "list", session, scope: "agent" });
-      const targetTab = tabs.tabs.find((tab) => tab.tabId === targetTabId);
-      const siblingTab = tabs.tabs.find((tab) => tab.tabId === sibling.tabId);
-      assert(targetTab && siblingTab, "both fixture tabs must remain inside the owned Agent Window");
-      assert.equal(targetTab.scope, "agent");
-      assert.equal(siblingTab.scope, "agent");
-      assert.equal(targetTab.active, false, "the tested fixture tab must be non-active");
-      assert.equal(siblingTab.active, true, "the owned sibling fixture tab must be active");
-      assert.equal(targetTab.windowId, siblingTab.windowId, "fixture and sibling must share the owned Agent Window");
+      assert(tabs.tabs.length > 0 && tabs.tabs.every((tab) => tab.scope === "agent"));
+      const targetTab = tabs.tabs.find((tab) => tab.url?.startsWith(url));
+      assert(targetTab, "the fixture target must be in the owned Agent Window");
+      const targetTabId = targetTab.tabId;
+      assert.equal(targetTab.active, true, "ordinary features use the active owned fixture tab");
+      targetTabBySession.set(session, targetTabId);
       run.targetTabId = targetTabId;
-      run.siblingTabId = sibling.tabId;
       run.agentWindowId = targetTab.windowId;
       const baselinePath = join(browserResults, "baseline.json");
       const baseline = await invoke("bsk_session", { action: "sync", session, tabId: targetTabId, policy: "auto", saveFull: baselinePath }, exec());
@@ -380,55 +369,29 @@ try {
           return { status: "readbackBlocked", reason: "Fresh sync failed; no readback or upload replay attempted", error: errorRecord(error) };
         }
       };
-      const collectBackgroundEvidence = async () => {
-        const currentTabs = await call("bsk_tabs", { action: "list", session, scope: "agent" });
-        const target = currentTabs.tabs.find((tab) => tab.tabId === targetTabId);
-        const activeSibling = currentTabs.tabs.find((tab) => tab.tabId === sibling.tabId);
-        const pageState = (await evaluate("({hidden:document.hidden,visibilityState:document.visibilityState,hasFocus:document.hasFocus()})")).value;
-        return {
-          targetTab: target ? { tabId: target.tabId, windowId: target.windowId, scope: target.scope, active: target.active } : null,
-          siblingTab: activeSibling ? { tabId: activeSibling.tabId, windowId: activeSibling.windowId, scope: activeSibling.scope, active: activeSibling.active } : null,
-          sameAgentWindow: Boolean(target && activeSibling && target.windowId === activeSibling.windowId),
-          pageState,
-          foreground: readAgentForeground(fixtureWindowMarker),
-        };
-      };
-      const isBackgroundProof = (proof) => proof.targetTab?.scope === "agent" && proof.targetTab.active === false && proof.siblingTab?.scope === "agent" && proof.siblingTab.active === true && proof.sameAgentWindow && proof.foreground?.available === true && proof.foreground.agentWindowFound === true && proof.foreground.foregroundIsAgentWindow === false;
-      let backgroundBlockedReason;
-      const verifyStillBackground = async (phase) => {
-        const proof = await collectBackgroundEvidence();
-        run.backgroundEvidence[phase] = proof;
-        if (!isBackgroundProof(proof)) {
-          backgroundBlockedReason = `Background ownership proof failed at ${phase}; no focus/help retry was attempted`;
-          throw Object.assign(new Error(backgroundBlockedReason), { blocked: true, data: proof });
-        }
-        return proof;
-      };
-      try {
-        run.backgroundEvidence = { beforeActions: await collectBackgroundEvidence() };
-        if (!isBackgroundProof(run.backgroundEvidence.beforeActions)) backgroundBlockedReason = "Could not prove the owned Agent Window is non-foreground with a non-active target tab";
-      } catch (error) {
-        run.backgroundEvidence = { beforeActionsError: errorRecord(error), foreground: readAgentForeground(fixtureWindowMarker) };
-        backgroundBlockedReason = "Background target probe failed before page tests; no focus or retry was attempted";
-      }
-      if (backgroundBlockedReason) {
-        run.blocked = true;
-        run.results.background = { blocked: true, reason: backgroundBlockedReason, evidence: run.backgroundEvidence };
-        report.blocked ??= [];
-        report.blocked.push({ browser, feature: "background", reason: backgroundBlockedReason, evidence: run.backgroundEvidence });
-      }
       let uncertainAction;
       const check = async (feature, action) => {
         if (requestedFeatures && !requestedFeatures.includes(feature)) return;
-        if (backgroundBlockedReason) {
-          run.results[feature] = { blocked: true, reason: backgroundBlockedReason };
-          return;
-        }
         if (uncertainAction) {
-          run.results[feature] = { blocked: true, reason: `Skipped after ${uncertainAction.feature} returned effect_state=unknown` };
+          const reason = `Skipped after ${uncertainAction.feature} returned effect_state=unknown`;
+          run.results[feature] = { blocked: true, reason };
+          run.blocked = true;
+          report.blocked ??= [];
+          report.blocked.push({ browser, feature, reason });
           return;
         }
-        try { run.results[feature] = { passed: true, value: await action() }; }
+        try {
+          const value = await action();
+          if (value?.acceptedLimitation === true) {
+            const limitation = { browser, feature, kind: value.kind, reason: value.reason, evidence: value.evidence, error: value.error };
+            run.results[feature] = { limitation: true, ...limitation };
+            run.limitations ??= [];
+            run.limitations.push(limitation);
+            report.limitations.push(limitation);
+          } else {
+            run.results[feature] = { passed: true, value };
+          }
+        }
         catch (error) {
           if (error.blocked === true) {
             run.results[feature] = { blocked: true, error: errorRecord(error) };
@@ -439,18 +402,29 @@ try {
             const failure = errorRecord(error);
             const effectUnknown = failure.data?.effect_state === "unknown";
             const uploadFeature = ["uploadSingle", "uploadMultiple", "uploadDrop"].includes(feature);
-            if (effectUnknown && uploadFeature) {
+            const edgeUploadLimit = isEdgeUploadLimitation(browser, edge, feature, error);
+            const captureInterruption = ["screenshot", "screenshotBackground"].includes(feature) && error.code === "cdp_failed" && ["page_hidden", "navigation"].includes(error.data?.reason);
+            const screenshotEvidence = captureInterruption
+              ? { foregroundBefore: run.screenshotForegroundBefore, foregroundAfter: readAgentForeground(fixtureWindowMarker) }
+              : undefined;
+            const backgroundScreenshotLimit = isBackgroundCaptureInterruption(feature, error, screenshotEvidence);
+            if (effectUnknown && browser === edge && uploadFeature) {
               failure.readback = await readUploadFixture(feature);
-              failure.compatDiagnostic = sanitizeReportValue(error.data?.compat_diagnostic ?? error.data?.compatDiagnostic ?? null);
             }
-            run.results[feature] = { passed: false, error: failure };
-            report.failures.push({ browser, feature, error: failure, stack: sanitizeReportValue(error.stack) });
-            if (effectUnknown) {
-              uncertainAction = { feature, error: failure };
-              run.blocked = true;
-              report.blocked ??= [];
-              report.blocked.push({ browser, feature, reason: "effect_state=unknown; only fresh-sync readback was attempted and subsequent actions are skipped", compatDiagnostic: failure.compatDiagnostic ?? null, readback: failure.readback ?? null, error: failure });
+            uncertainAction = effectUnknown ? { feature, error: failure } : uncertainAction;
+            if (edgeUploadLimit || backgroundScreenshotLimit) {
+              const limitation = edgeUploadLimit
+                ? { browser, feature, kind: "edge-upload-control-context-invalid", reason: "Official Edge control lease invalidated during upload; not replayed and not counted as upload success", error: failure, readback: failure.readback ?? { status: "not-attempted" } }
+                : { browser, feature, kind: `background-fullpage-${error.data?.reason}`, reason: `Official full-page capture returned ${error.data?.reason} while the owned Agent Window was not foreground; this is an accepted limitation, not equivalent background capture`, error: failure, evidence: screenshotEvidence };
+              run.results[feature] = { limitation: true, ...limitation };
+              run.limitations ??= [];
+              run.limitations.push(limitation);
+              report.limitations.push(limitation);
+            } else {
+              run.results[feature] = { passed: false, error: failure };
+              report.failures.push({ browser, feature, error: failure, stack: sanitizeReportValue(error.stack) });
             }
+            if (effectUnknown) run.stopAfterUnknown = { feature, readbackAttempted: browser === edge && uploadFeature };
           }
         }
       };
@@ -525,21 +499,18 @@ try {
       }));
       await check("uploadSingle", async () => {
         await call("bsk_interact", { action: "upload", session, target: "#single", files: [inputFiles[0]] });
-        await verifyStillBackground("after-uploadSingle");
         const readback = await readUploadFixture("uploadSingle");
         assert.equal(readback.status, "verified");
         return readback;
       });
       await check("uploadMultiple", async () => {
         await call("bsk_interact", { action: "upload", session, target: "#multi", files: inputFiles, mode: "input" });
-        await verifyStillBackground("after-uploadMultiple");
         const readback = await readUploadFixture("uploadMultiple");
         assert.equal(readback.status, "verified");
         return readback;
       });
       await check("uploadDrop", async () => {
         await call("bsk_interact", { action: "upload", session, target: "#drop", files: inputFiles, mode: "drop" });
-        await verifyStillBackground("after-uploadDrop");
         const readback = await readUploadFixture("uploadDrop");
         assert.equal(readback.status, "verified");
         return readback;
@@ -559,8 +530,7 @@ try {
         const screenshot = join(browserResults, "full.png");
         const followPath = join(browserResults, "follow.png");
         const shotArgs = { action: "screenshot", session, tabId: targetTabId, fullPage: true, scope: "current", output: screenshot, timeoutMs: 30_000 };
-        run.screenshotDiagnostic = {};
-        await verifyStillBackground("beforeCurrentCapture");
+        run.screenshotForegroundBefore = readAgentForeground(fixtureWindowMarker);
         const shot = await call("bsk_inspect", shotArgs);
         assert(shot.height > 1500 && shot.width > 0 && shot.byteSize > 0);
         assert(shot.image, "current screenshot must return a durable fixture attachment");
@@ -568,13 +538,11 @@ try {
         const screenshotHash = createHash("sha256").update(await readFile(screenshot)).digest("hex");
         await reject("bsk_inspect", shotArgs, /exist/i);
         assert.equal(createHash("sha256").update(await readFile(screenshot)).digest("hex"), screenshotHash);
-        run.screenshotDiagnostic.afterCurrent = await verifyStillBackground("afterCurrentCapture");
         const followArgs = { action: "screenshot", session, tabId: targetTabId, fullPage: true, scope: "follow", output: followPath, timeoutMs: 30_000 };
         const follow = await call("bsk_inspect", followArgs);
         assert(follow.height > 1500 && follow.width > 0 && follow.byteSize > 0);
         assert(follow.image, "follow screenshot must return a durable fixture attachment");
         assert(tools.get("bsk_inspect").output.render(followArgs, follow).some((block) => block.type === "image"));
-        run.screenshotDiagnostic.afterFollow = await verifyStillBackground("afterFollowCapture");
         assert((await stat(followPath)).size > 0);
         return {
           current: { path: screenshot, width: shot.width, height: shot.height, byteSize: shot.byteSize, attachment: shot.image },
@@ -656,10 +624,12 @@ try {
         await reject("bsk_inspect", { action: "view", file: baselinePath, contextId: baseline.context_id }, /historical|does not accept|unknown/i);
         return viewed;
       });
-      if (backgroundBlockedReason && (!requestedFeatures || requestedFeatures.includes("incognito"))) {
-        run.results.incognito = { blocked: true, reason: backgroundBlockedReason };
-      } else if (uncertainAction && (!requestedFeatures || requestedFeatures.includes("incognito"))) {
-        run.results.incognito = { blocked: true, reason: `Skipped after ${uncertainAction.feature} returned effect_state=unknown` };
+      if (uncertainAction && (!requestedFeatures || requestedFeatures.includes("incognito"))) {
+        const reason = `Skipped after ${uncertainAction.feature} returned effect_state=unknown`;
+        run.results.incognito = { blocked: true, reason };
+        run.blocked = true;
+        report.blocked ??= [];
+        report.blocked.push({ browser, feature: "incognito", reason });
       } else if (!requestedFeatures || requestedFeatures.includes("incognito")) {
         let privateSession;
         let privateTabsSummary = [];
@@ -733,11 +703,84 @@ try {
         await invoke("bsk_assist", { action: "operation-cancel", session, operationId: second.operationId });
         return { acceptedOperation: original, cancelledOperation: second.operationId };
       });
-      await check("background", async () => {
-        const finalEvidence = await collectBackgroundEvidence();
-        run.backgroundEvidence.afterActions = finalEvidence;
-        assert(isBackgroundProof(finalEvidence), "owned Agent Window must remain non-foreground and target tab must remain non-active");
-        return { startNoFocus: run.startNoFocus, beforeActions: run.backgroundEvidence.beforeActions, afterActions: finalEvidence };
+      await check("screenshotBackground", async () => {
+        let backgroundSession;
+        const captures = {};
+        const evidence = {};
+        try {
+          const started = await call("bsk_session", { action: "start", browser, name: `bsk-background-shot-${label}`, url, width: 1000, height: 800, noFocus: true });
+          backgroundSession = started.sessionId;
+          assert.equal(started.browserInstanceId, browser);
+          const targetTabs = await call("bsk_tabs", { action: "list", session: backgroundSession, scope: "agent" });
+          const targetTabId = targetTabs.tabs[0]?.tabId;
+          assert(targetTabId !== undefined && targetTabs.tabs.every((tab) => tab.scope === "agent"));
+          targetTabBySession.set(backgroundSession, targetTabId);
+          const observed = await call("bsk_inspect", { action: "observe", session: backgroundSession });
+          assert.match(observed.text, /BrowserSkill/);
+          const sync = await invoke("bsk_session", { action: "sync", session: backgroundSession, tabId: targetTabId, policy: "auto" }, exec());
+          assert.equal(sync.control_policy, "target");
+          const sibling = await call("bsk_tabs", { action: "create", session: backgroundSession, url: `${url}?background-sibling=${randomUUID()}`, active: true });
+          const readEvidence = async () => {
+            const currentTabs = await call("bsk_tabs", { action: "list", session: backgroundSession, scope: "agent" });
+            const target = currentTabs.tabs.find((tab) => tab.tabId === targetTabId);
+            const activeSibling = currentTabs.tabs.find((tab) => tab.tabId === sibling.tabId);
+            const foreground = readAgentForeground(fixtureWindowMarker);
+            return {
+              targetTab: target ? { tabId: target.tabId, windowId: target.windowId, scope: target.scope, active: target.active } : null,
+              siblingTab: activeSibling ? { tabId: activeSibling.tabId, windowId: activeSibling.windowId, scope: activeSibling.scope, active: activeSibling.active } : null,
+              sameAgentWindow: Boolean(target && activeSibling && target.windowId === activeSibling.windowId),
+              foreground,
+            };
+          };
+          const backgroundProven = (value) => value.targetTab?.scope === "agent" && value.targetTab.active === false && value.siblingTab?.scope === "agent" && value.siblingTab.active === true && value.sameAgentWindow && value.foreground.available === true && value.foreground.agentWindowFound === true && value.foreground.foregroundIsAgentWindow === false;
+          evidence.before = await readEvidence();
+          assert(backgroundProven(evidence.before), "must prove owned Agent Window is non-foreground with target tab inactive");
+          let stopAfterUnknown = false;
+          for (const [scope, output] of [["current", join(browserResults, "background-current.png")], ["follow", join(browserResults, "background-follow.png")]]) {
+            const before = await readEvidence();
+            assert(backgroundProven(before), `${scope} capture must start with proven background state`);
+            try {
+              const shot = await call("bsk_inspect", { action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope, output, timeoutMs: 30_000 });
+              assert(shot.width > 0 && shot.height > 1500 && shot.byteSize > 0 && shot.image);
+              assert(tools.get("bsk_inspect").output.render({ action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope, output }, shot).some((block) => block.type === "image"));
+              assert((await stat(output)).size > 0);
+              captures[scope] = { output, width: shot.width, height: shot.height, byteSize: shot.byteSize, attachment: shot.image };
+            } catch (error) {
+              if (error.code !== "cdp_failed" || !["page_hidden", "navigation"].includes(error.data?.reason)) throw error;
+              const foregroundAfter = readAgentForeground(fixtureWindowMarker);
+              assert(backgroundProven(before) && isBackgroundCaptureInterruption("screenshotBackground", error, { foregroundBefore: before.foreground, foregroundAfter }), `${scope} ${error.data.reason} was not observed with proven background state before and after`);
+              captures[scope] = { limitation: true, reason: error.data.reason, error: errorRecord(error), before, foregroundAfter };
+              if (error.data?.effect_state === "unknown") {
+                stopAfterUnknown = true;
+                break;
+              }
+            }
+          }
+          if (stopAfterUnknown) evidence.foregroundAfterUnknown = readAgentForeground(fixtureWindowMarker);
+          else {
+            evidence.after = await readEvidence();
+            assert(backgroundProven(evidence.after), "background state must remain proven after both captures");
+          }
+          if (Object.values(captures).some((capture) => capture.limitation)) {
+            const reason = Object.values(captures).find((capture) => capture.limitation)?.reason;
+            return { acceptedLimitation: true, kind: `background-fullpage-${reason}`, reason: `Official full-page capture returned ${reason} in a proven non-foreground owned Agent Window; not equivalent capture success`, captures, evidence };
+          }
+          return { captures, evidence };
+        } finally {
+          if (backgroundSession) {
+            await call("bsk_session", { action: "stop", session: backgroundSession });
+            const owned = await call("bsk_session", { action: "list" });
+            assert(!owned.sessions.some((entry) => entry.sessionId === backgroundSession));
+            targetTabBySession.delete(backgroundSession);
+            const retained = {};
+            for (const [scope, capture] of Object.entries(captures)) {
+              if (capture.limitation) continue;
+              retained[scope] = (await stat(capture.output)).size > 0;
+              assert(retained[scope], `${scope} background screenshot must survive session stop`);
+            }
+            run.backgroundScreenshotCleanup = { stopped: true, retained };
+          }
+        }
       });
       run.passed = !run.blocked && Object.values(run.results).every((feature) => feature.passed === true);
     } catch (error) {
@@ -775,9 +818,14 @@ try {
   report.finishedAt = new Date().toISOString();
   report.requestedBrowsers = requestedBrowsers;
   report.requestedFeatures = requestedFeatures ?? knownFeatures;
-  report.passed = report.failures.length === 0 && report.browsers.length === requestedBrowsers.length && report.browsers.every((browser) => browser.passed && (requestedFeatures ?? knownFeatures).every((feature) => browser.results[feature]?.passed));
+  const expectedFeatures = requestedFeatures ?? knownFeatures;
+  const allRequestedResolved = report.browsers.length === requestedBrowsers.length && report.browsers.every((browser) => expectedFeatures.every((feature) => browser.results[feature]?.passed === true || browser.results[feature]?.limitation === true));
+  const allRequestedPassed = report.failures.length === 0 && !report.blocked?.length && allRequestedResolved && report.limitations.length === 0;
+  report.outcome = classifyOutcome({ failures: report.failures.length, blocked: report.blocked?.length ?? 0, allRequestedResolved, limitations: report.limitations.length, allRequestedPassed });
+  report.passed = report.outcome === "passed";
   const output = join(results, "report.json");
   await writeFile(output, JSON.stringify(sanitizeReportValue(report), null, 2));
-  console.log(`${report.passed ? "PASS" : "FAIL"} candidate live smoke: ${output}`);
-  if (!report.passed) process.exitCode = 1;
+  console.log(`${report.outcome.toUpperCase()} candidate live smoke: ${output}`);
+  if (report.outcome === "failed") process.exitCode = 1;
+  else if (report.outcome !== "passed" && report.outcome !== "accepted-limitations") process.exitCode = 2;
 }
