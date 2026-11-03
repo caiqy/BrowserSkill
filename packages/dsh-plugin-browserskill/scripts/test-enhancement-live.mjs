@@ -1,4 +1,4 @@
-// Opt-in smoke: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all]
+// Opt-in smoke: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all] [screenshotBackgroundScope]
 // Browser actions use only the packed plugin's six public tools and its real shared runner.
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -12,11 +12,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const OFFICIAL_COMPONENT_VERSION = "0.4.1";
 const OFFICIAL_PROTOCOL_VERSION = "1.8";
-const [archiveArg, resultsArg, chrome, edge, only, featureArg] = process.argv.slice(2);
+const [archiveArg, resultsArg, chrome, edge, only, featureArg, screenshotScopeArg] = process.argv.slice(2);
 const requestedFeatures = !featureArg || featureArg === "all" ? undefined : featureArg.split(",");
 const knownFeatures = ["wait", "control", "evaluate", "evaluateCancel", "evaluateTimeout", "uploadSingle", "uploadMultiple", "uploadDrop", "missingUpload", "download", "screenshot", "html", "emulate", "hover", "drag", "step", "view", "incognito", "dialog", "screenshotBackground"];
+const screenshotScope = screenshotScopeArg ?? "current";
+const validScreenshotScopeRequest = (scope, features, scopeArg) => ["current", "follow"].includes(scope) && (scopeArg === undefined || features?.length === 1 && features[0] === "screenshotBackground");
+assert(validScreenshotScopeRequest("current", ["screenshotBackground"], "current"));
+assert(validScreenshotScopeRequest("follow", ["screenshotBackground"], "follow"));
+assert(!validScreenshotScopeRequest("viewport", ["screenshotBackground"], "viewport"));
+assert(!validScreenshotScopeRequest("follow", ["screenshotBackground", "html"], "follow"));
+assert(validScreenshotScopeRequest(screenshotScope, requestedFeatures, screenshotScopeArg), "Screenshot scope must be current or follow, and may only be specified with the screenshotBackground feature alone");
 assert(!requestedFeatures || requestedFeatures.every((feature) => knownFeatures.includes(feature)), "Unknown feature filter");
-assert(archiveArg && resultsArg && chrome && edge, "Usage: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all]");
+assert(archiveArg && resultsArg && chrome && edge, "Usage: node scripts/test-enhancement-live.mjs <candidate.tgz> <results-dir> <chrome-id> <edge-id> [chrome|edge] [features|all] [current|follow]");
 assert(only === undefined || only === "chrome" || only === "edge", "Optional browser filter must be chrome or edge");
 const requestedBrowsers = [["chrome", chrome], ["edge", edge]].filter(([label]) => only === undefined || label === only);
 if (requestedBrowsers.some(([label]) => label === "edge")) {
@@ -27,13 +34,14 @@ const archive = resolve(archiveArg);
 const results = resolve(resultsArg);
 const archiveBytes = (await stat(archive)).size;
 const archiveHash = createHash("sha256").update(await readFile(archive)).digest("hex");
+const scriptHash = createHash("sha256").update(await readFile(fileURLToPath(import.meta.url))).digest("hex");
 await mkdir(results, { recursive: true });
 const scratch = await mkdtemp(join(tmpdir(), "bsk-candidate-live-"));
 const originalCwd = process.cwd();
 const disposers = [];
 const tools = new Map();
 const targetTabBySession = new Map();
-const report = { candidate: archive, bytes: archiveBytes, sha256: archiveHash, startedAt: new Date().toISOString(), calls: [], browsers: [], failures: [], limitations: [], cleanup: [] };
+const report = { candidate: archive, bytes: archiveBytes, sha256: archiveHash, scriptSha256: scriptHash, startedAt: new Date().toISOString(), ...(requestedFeatures?.includes("screenshotBackground") || !requestedFeatures ? { requestedScope: screenshotScope } : {}), calls: [], browsers: [], failures: [], limitations: [], cleanup: [] };
 report.fixtureBoundary = "Packed apply and all six public tools use the unmodified real runner/CLI/daemon/extensions. Context registration, image-capable model metadata and the durable local attachment store are host fixtures; no desktop GUI or actual DSH attachment service is claimed.";
 report.componentRequirement = { cli: OFFICIAL_COMPONENT_VERSION, daemon: OFFICIAL_COMPONENT_VERSION, extension: OFFICIAL_COMPONENT_VERSION, protocol: OFFICIAL_PROTOCOL_VERSION, customizedComponentsAllowed: false };
 const downloadContent = "BrowserSkill 下载测试\n";
@@ -50,13 +58,21 @@ const page = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Browse
 <div class="spacer">Full-page test spacer</div><p id="fixture-end">End of test page</p>
 <script>const drop=document.querySelector('#drop');drop.addEventListener('dragover',e=>e.preventDefault());drop.addEventListener('drop',e=>{e.preventDefault();window.dropped=Promise.all([...e.dataTransfer.files].map(async f=>({name:f.name,text:await f.text()})));});
 document.querySelector('#drag-target').addEventListener('dragover',e=>e.preventDefault());document.querySelector('#drag-source').addEventListener('dragstart',e=>e.dataTransfer.setData('text/plain','source'));document.querySelector('#drag-target').addEventListener('drop',e=>{e.preventDefault();document.querySelector('#drag-result').value=e.dataTransfer.getData('text/plain');});</script></html>`;
+const backgroundMarkerPattern = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
 const server = createServer((req, res) => {
-  if (req.url === "/download") {
+  const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+  if (requestUrl.pathname === "/download") {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": 'attachment; filename="bsk-smoke.txt"' });
     res.end(downloadContent);
   } else {
+    const marker = requestUrl.searchParams.get("background-window");
+    if (marker !== null && !backgroundMarkerPattern.test(marker)) {
+      res.writeHead(400);
+      res.end();
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(page);
+    res.end(marker ? page.replace(fixtureWindowMarker, `bsk-background-${marker}`) : page);
   }
 });
 let sequence = 0;
@@ -90,6 +106,10 @@ assert.equal("html" in sanitizedHtmlExample.browsers[0].results.html.value, fals
 assert.equal("text" in sanitizedHtmlExample.browsers[0].results.html.value, false);
 assert.equal("html" in sanitizedHtmlExample, false);
 assert(sanitizedHtmlExample.requestedFeatures.every((feature) => sanitizedHtmlExample.browsers.every((browser) => browser.results[feature]?.passed === true || browser.results[feature]?.limitation === true)), "sanitization must preserve requested feature completeness");
+const pathExists = async (path) => {
+  try { await stat(path); return true; }
+  catch (error) { if (error.code === "ENOENT") return false; throw error; }
+};
 const errorRecord = (error) => ({
   message: sanitizeReportValue(String(error)),
   code: error?.code,
@@ -103,17 +123,19 @@ const isEdgeUploadLimitation = (browserId, edgeId, feature, error) =>
 const isBackgroundCaptureInterruption = (feature, error, evidence) =>
   ["screenshot", "screenshotBackground"].includes(feature) && error?.code === "cdp_failed" &&
   ["page_hidden", "navigation"].includes(error.data?.reason) && evidence?.foregroundBefore?.available === true &&
-  evidence.foregroundBefore.agentWindowFound === true && evidence.foregroundBefore.foregroundIsAgentWindow === false &&
-  evidence.foregroundAfter?.available === true && evidence.foregroundAfter.agentWindowFound === true &&
+  evidence.foregroundBefore.matchingWindowCount === 1 && evidence.foregroundBefore.agentWindowFound === true && evidence.foregroundBefore.foregroundIsAgentWindow === false &&
+  evidence.foregroundAfter?.available === true && evidence.foregroundAfter.matchingWindowCount === 1 && evidence.foregroundAfter.agentWindowFound === true &&
   evidence.foregroundAfter.foregroundIsAgentWindow === false;
 assert(isEdgeUploadLimitation("edge-id", "edge-id", "uploadSingle", { code: "permission_denied", data: { phase: "control", reason: "control_context_invalid", effect_state: "unknown" } }));
 assert(!isEdgeUploadLimitation("chrome-id", "edge-id", "uploadSingle", { code: "permission_denied", data: { phase: "control", reason: "control_context_invalid", effect_state: "unknown" } }));
 assert(!isEdgeUploadLimitation("edge-id", "edge-id", "uploadSingle", { code: "permission_denied", data: { phase: "input", reason: "control_context_invalid", effect_state: "unknown" } }));
 assert(!isEdgeUploadLimitation("edge-id", "edge-id", "download", { code: "permission_denied", data: { phase: "control", reason: "control_context_invalid", effect_state: "unknown" } }));
-const backgroundForegroundEvidence = { foregroundBefore: { available: true, agentWindowFound: true, foregroundIsAgentWindow: false }, foregroundAfter: { available: true, agentWindowFound: true, foregroundIsAgentWindow: false } };
+const backgroundForegroundEvidence = { foregroundBefore: { available: true, matchingWindowCount: 1, agentWindowFound: true, foregroundIsAgentWindow: false }, foregroundAfter: { available: true, matchingWindowCount: 1, agentWindowFound: true, foregroundIsAgentWindow: false } };
 assert(isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, backgroundForegroundEvidence));
 assert(isBackgroundCaptureInterruption("screenshotBackground", { code: "cdp_failed", data: { reason: "navigation" } }, backgroundForegroundEvidence));
-assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, { ...backgroundForegroundEvidence, foregroundAfter: { available: true, agentWindowFound: true, foregroundIsAgentWindow: true } }));
+assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, { ...backgroundForegroundEvidence, foregroundBefore: { available: true, agentWindowFound: true, foregroundIsAgentWindow: false } }));
+assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, { ...backgroundForegroundEvidence, foregroundAfter: { available: true, matchingWindowCount: 2, agentWindowFound: true, foregroundIsAgentWindow: false } }));
+assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "page_hidden" } }, { ...backgroundForegroundEvidence, foregroundAfter: { available: true, matchingWindowCount: 1, agentWindowFound: true, foregroundIsAgentWindow: true } }));
 assert(!isBackgroundCaptureInterruption("screenshot", { code: "cdp_failed", data: { reason: "watchdog_timeout" } }, backgroundForegroundEvidence));
 const classifyOutcome = ({ failures, blocked, allRequestedResolved, limitations, allRequestedPassed }) =>
   failures > 0 ? "failed" : blocked > 0 ? "blocked" : !allRequestedResolved ? "incomplete" : limitations > 0 ? "accepted-limitations" : allRequestedPassed ? "passed" : "incomplete";
@@ -133,16 +155,17 @@ public static class BskForegroundProbe {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
   public static string Read(string marker) {
     IntPtr owned = IntPtr.Zero;
+    int matches = 0;
     EnumWindows((hWnd, lParam) => {
       var title = new StringBuilder(512);
       if (GetWindowText(hWnd, title, title.Capacity) > 0 && title.ToString().IndexOf(marker, StringComparison.Ordinal) >= 0) {
         owned = hWnd;
-        return false;
+        matches++;
       }
       return true;
     }, IntPtr.Zero);
     IntPtr foreground = GetForegroundWindow();
-    return string.Format("{0}|{1}", owned != IntPtr.Zero, owned != IntPtr.Zero && foreground == owned);
+    return string.Format("{0}|{1}", matches, matches == 1 && foreground == owned);
   }
 }
 "@
@@ -155,9 +178,10 @@ const readAgentForeground = (marker) => {
     const raw = execFileSync("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", foregroundProbeScript], {
       encoding: "utf8", timeout: 5000, env: { ...process.env, BSK_FIXTURE_WINDOW_MARKER: marker },
     }).trim();
-    const [found, foreground] = raw.split("|");
-    assert(["True", "False"].includes(found) && ["True", "False"].includes(foreground));
-    return { available: true, agentWindowFound: found === "True", foregroundIsAgentWindow: foreground === "True" };
+    const [count, foreground] = raw.split("|");
+    const matchingWindowCount = Number(count);
+    assert(Number.isInteger(matchingWindowCount) && matchingWindowCount >= 0 && ["True", "False"].includes(foreground));
+    return { available: true, matchingWindowCount, agentWindowFound: matchingWindowCount > 0, foregroundIsAgentWindow: foreground === "True" };
   } catch {
     return { available: false, reason: "Read-only foreground probe unavailable; no window title or process details recorded" };
   }
@@ -722,9 +746,13 @@ try {
       await check("screenshotBackground", async () => {
         let backgroundSession;
         const captures = {};
-        const evidence = {};
+        const backgroundWindowUUID = randomUUID();
+        const backgroundWindowMarker = `bsk-background-${backgroundWindowUUID}`;
+        const backgroundURL = `${url}?background-window=${encodeURIComponent(backgroundWindowUUID)}`;
+        const output = join(browserResults, `background-${screenshotScope}.png`);
+        const evidence = { requestedScope: screenshotScope };
         try {
-          const started = await call("bsk_session", { action: "start", browser, name: `bsk-background-shot-${label}`, url, width: 1000, height: 800, noFocus: true });
+          const started = await call("bsk_session", { action: "start", browser, name: `bsk-background-shot-${label}`, url: backgroundURL, width: 1000, height: 800, noFocus: true });
           backgroundSession = started.sessionId;
           assert.equal(started.browserInstanceId, browser);
           const targetTabs = await call("bsk_tabs", { action: "list", session: backgroundSession, scope: "agent" });
@@ -735,12 +763,12 @@ try {
           assert.match(observed.text, /BrowserSkill/);
           const sync = await invoke("bsk_session", { action: "sync", session: backgroundSession, tabId: targetTabId, policy: "auto" }, exec());
           assert.equal(sync.control_policy, "target");
-          const sibling = await call("bsk_tabs", { action: "create", session: backgroundSession, url: `${url}?background-sibling=${randomUUID()}`, active: true });
+          const sibling = await call("bsk_tabs", { action: "create", session: backgroundSession, url: backgroundURL, active: true });
           const readEvidence = async () => {
             const currentTabs = await call("bsk_tabs", { action: "list", session: backgroundSession, scope: "agent" });
             const target = currentTabs.tabs.find((tab) => tab.tabId === targetTabId);
             const activeSibling = currentTabs.tabs.find((tab) => tab.tabId === sibling.tabId);
-            const foreground = readAgentForeground(fixtureWindowMarker);
+            const foreground = readAgentForeground(backgroundWindowMarker);
             return {
               targetTab: target ? { tabId: target.tabId, windowId: target.windowId, scope: target.scope, active: target.active } : null,
               siblingTab: activeSibling ? { tabId: activeSibling.tabId, windowId: activeSibling.windowId, scope: activeSibling.scope, active: activeSibling.active } : null,
@@ -748,40 +776,49 @@ try {
               foreground,
             };
           };
-          const backgroundProven = (value) => value.targetTab?.scope === "agent" && value.targetTab.active === false && value.siblingTab?.scope === "agent" && value.siblingTab.active === true && value.sameAgentWindow && value.foreground.available === true && value.foreground.agentWindowFound === true && value.foreground.foregroundIsAgentWindow === false;
+          const backgroundProven = (value) => value.targetTab?.scope === "agent" && value.targetTab.active === false && value.siblingTab?.scope === "agent" && value.siblingTab.active === true && value.sameAgentWindow && value.foreground.available === true && value.foreground.matchingWindowCount === 1 && value.foreground.agentWindowFound === true && value.foreground.foregroundIsAgentWindow === false;
           evidence.before = await readEvidence();
+          run.backgroundScreenshotEvidence = { [screenshotScope]: { requestedScope: screenshotScope, before: evidence.before } };
           assert(backgroundProven(evidence.before), "must prove owned Agent Window is non-foreground with target tab inactive");
-          let stopAfterUnknown = false;
-          for (const [scope, output] of [["current", join(browserResults, "background-current.png")], ["follow", join(browserResults, "background-follow.png")]]) {
-            const before = await readEvidence();
-            assert(backgroundProven(before), `${scope} capture must start with proven background state`);
-            try {
-              const shot = await call("bsk_inspect", { action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope, output, timeoutMs: 30_000 });
-              assert(shot.width > 0 && shot.height > 1500 && shot.byteSize > 0 && shot.image);
-              assert(tools.get("bsk_inspect").output.render({ action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope, output }, shot).some((block) => block.type === "image"));
-              assert((await stat(output)).size > 0);
-              captures[scope] = { output, width: shot.width, height: shot.height, byteSize: shot.byteSize, attachment: shot.image };
-            } catch (error) {
-              if (error.code !== "cdp_failed" || !["page_hidden", "navigation"].includes(error.data?.reason)) throw error;
-              const foregroundAfter = readAgentForeground(fixtureWindowMarker);
-              assert(backgroundProven(before) && isBackgroundCaptureInterruption("screenshotBackground", error, { foregroundBefore: before.foreground, foregroundAfter }), `${scope} ${error.data.reason} was not observed with proven background state before and after`);
-              captures[scope] = { limitation: true, reason: error.data.reason, error: errorRecord(error), before, foregroundAfter };
-              if (error.data?.effect_state === "unknown") {
-                stopAfterUnknown = true;
-                break;
-              }
-            }
+          assert.equal(await pathExists(output), false, "fresh screenshot output path must not already exist");
+          const attachmentSequenceBefore = attachmentSequence;
+          let shot;
+          try {
+            shot = await call("bsk_inspect", { action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope: screenshotScope, output, timeoutMs: 30_000 });
+          } catch (error) {
+            const outputExists = await pathExists(output);
+            const foregroundAfter = readAgentForeground(backgroundWindowMarker);
+            const attachmentCount = attachmentSequence - attachmentSequenceBefore;
+            const failureEvidence = { requestedScope: screenshotScope, before: evidence.before, foregroundAfter, outputExists, attachmentCount };
+            run.backgroundScreenshotEvidence[screenshotScope].failure = failureEvidence;
+            assert.equal(outputExists, false, "failed screenshot must leave no partial output");
+            assert.equal(attachmentCount, 0, "failed screenshot must not leave a partial attachment");
+            if (!isBackgroundCaptureInterruption("screenshotBackground", error, { foregroundBefore: evidence.before.foreground, foregroundAfter })) throw error;
+            captures[screenshotScope] = { limitation: true, scope: screenshotScope, reason: error.data.reason, error: errorRecord(error), outputExists, attachmentCount };
+            evidence.foregroundAfter = foregroundAfter;
+            return { acceptedLimitation: true, requestedScope: screenshotScope, kind: `background-fullpage-${error.data.reason}`, reason: `Official full-page capture returned ${error.data.reason} in a proven non-foreground owned Agent Window; not equivalent capture success`, captures, evidence };
           }
-          if (stopAfterUnknown) evidence.foregroundAfterUnknown = readAgentForeground(fixtureWindowMarker);
-          else {
-            evidence.after = await readEvidence();
-            assert(backgroundProven(evidence.after), "background state must remain proven after both captures");
-          }
-          if (Object.values(captures).some((capture) => capture.limitation)) {
-            const reason = Object.values(captures).find((capture) => capture.limitation)?.reason;
-            return { acceptedLimitation: true, kind: `background-fullpage-${reason}`, reason: `Official full-page capture returned ${reason} in a proven non-foreground owned Agent Window; not equivalent capture success`, captures, evidence };
-          }
-          return { captures, evidence };
+          assert.equal(attachmentSequence, attachmentSequenceBefore + 1, "successful screenshot must save one PNG attachment");
+          assert(shot.width > 0 && shot.height > 1500 && shot.byteSize > 0 && shot.image);
+          assert.equal(shot.image.width, shot.width);
+          assert.equal(shot.image.height, shot.height);
+          assert(tools.get("bsk_inspect").output.render({ action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope: screenshotScope, output }, shot).some((block) => block.type === "image"));
+          const outputBytes = (await stat(output)).size;
+          const attachmentPath = join(results, `live-${attachmentSequence}.png`);
+          const attachmentBytes = (await stat(attachmentPath)).size;
+          assert(outputBytes > 0 && attachmentBytes > 0);
+          assert.equal(attachmentBytes, shot.image.bytes);
+          captures[screenshotScope] = { requestedScope: screenshotScope, dispatchedScope: screenshotScope, output, outputBytes, width: shot.width, height: shot.height, byteSize: shot.byteSize, attachmentPath, attachmentBytes, attachment: shot.image };
+          const collisionPath = join(browserResults, `background-${screenshotScope}-existing.png`);
+          const sentinel = "preserve existing screenshot output";
+          await writeFile(collisionPath, sentinel, { flag: "wx" });
+          await reject("bsk_inspect", { action: "screenshot", session: backgroundSession, tabId: targetTabId, fullPage: true, scope: screenshotScope, output: collisionPath, timeoutMs: 30_000 }, /exist/i);
+          assert.equal(await readFile(collisionPath, "utf8"), sentinel, "screenshot must not replace existing output");
+          captures[screenshotScope].existingOutputRefused = true;
+          evidence.after = await readEvidence();
+          assert(backgroundProven(evidence.after), "background state must remain proven after capture");
+          run.backgroundScreenshotEvidence[screenshotScope].after = evidence.after;
+          return { requestedScope: screenshotScope, captures, evidence };
         } finally {
           if (backgroundSession) {
             await call("bsk_session", { action: "stop", session: backgroundSession });
@@ -790,11 +827,18 @@ try {
             targetTabBySession.delete(backgroundSession);
             const retained = {};
             for (const [scope, capture] of Object.entries(captures)) {
-              if (capture.limitation) continue;
-              retained[scope] = (await stat(capture.output)).size > 0;
-              assert(retained[scope], `${scope} background screenshot must survive session stop`);
+              if (capture.limitation) {
+                assert.equal(capture.outputExists, false);
+                assert.equal(capture.attachmentCount, 0);
+                retained[scope] = { outputExists: false, partialAttachmentCount: 0 };
+                continue;
+              }
+              const outputBytes = (await stat(capture.output)).size;
+              const attachmentBytes = (await stat(capture.attachmentPath)).size;
+              assert(outputBytes > 0 && attachmentBytes > 0, `${scope} PNG outputs must survive session stop`);
+              retained[scope] = { outputBytes, attachmentBytes };
             }
-            run.backgroundScreenshotCleanup = { stopped: true, retained };
+            run.backgroundScreenshotCleanup = { requestedScope: screenshotScope, stopped: true, retained };
           }
         }
       });
